@@ -1,0 +1,37 @@
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+*.db
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+.ruff_cache/
+
+# --- Node / Next.js ---
+node_modules/
+.next/
+next-env.d.ts
+*.tsbuildinfo
+npm-debug.log*
+
+# --- Env files ---
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# --- Generated data / build artifacts ---
+backend/data/indices/*
+!backend/data/indices/.gitkeep
+backend/data/uploads/
+backend/data/synthetic_claims/*.json
+!backend/data/synthetic_claims/.gitkeep
+
+# --- IDE / OS ---
+.DS_Store
+.vscode/
+.idea/
