@@ -22,19 +22,35 @@ services:
       timeout: 5s
       retries: 3
       start_period: 15s
+    restart: unless-stopped
 
   frontend:
     build:
       context: .
       dockerfile: docker/frontend.Dockerfile
+      # NEXT_PUBLIC_* values are compiled into the client bundle at build time (see the
+      # Dockerfile's comment) — changing them means rebuilding this image, not just restarting
+      # the container. Defaults match the backend service's own ports/hostnames above for a
+      # zero-config `docker compose up`; override via a shell env var or a `.env` entry with
+      # the same name (compose reads `.env` for variable substitution here automatically,
+      # independent of the backend service's explicit `env_file:` load of the same file) to
+      # point at a real deployed backend instead.
       args:
-        NEXT_PUBLIC_API_BASE_URL: http://localhost:8000
-        NEXT_PUBLIC_WS_BASE_URL: ws://localhost:8000
+        NEXT_PUBLIC_API_BASE_URL: ${NEXT_PUBLIC_API_BASE_URL:-http://localhost:8000}
+        NEXT_PUBLIC_WS_BASE_URL: ${NEXT_PUBLIC_WS_BASE_URL:-ws://localhost:8000}
+        NEXT_PUBLIC_API_KEY: ${NEXT_PUBLIC_API_KEY:?NEXT_PUBLIC_API_KEY must be set — see .env.example and docs/environment-variables.md}
     ports:
       - "3000:3000"
     depends_on:
       backend:
         condition: service_healthy
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000', r => process.exit(r.statusCode < 500 ? 0 : 1)).on('error', () => process.exit(1))"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    restart: unless-stopped
 
 volumes:
   backend_data:

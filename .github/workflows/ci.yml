@@ -4,6 +4,9 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Lets deploy.yml call this workflow as its own gate (`uses: ./.github/workflows/ci.yml`)
+  # instead of duplicating the lint/typecheck/test steps — see deploy.yml's `ci` job.
+  workflow_call:
 
 jobs:
   backend:

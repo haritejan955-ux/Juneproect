@@ -19,6 +19,9 @@ Read in this order:
 | [memory-architecture.md](./memory-architecture.md) | Short-term checkpointing, long-term store, dispute conversation memory |
 | [security-architecture.md](./security-architecture.md) | Hybrid injection detection, PII redaction, hard-block enforcement, defense-in-depth |
 | [design-decisions.md](./design-decisions.md) | Consolidated decision log — what was chosen, what was rejected, why |
+| [environment-variables.md](./environment-variables.md) | Every backend/frontend environment variable — purpose, secrecy, default, where it's supplied |
+| [deployment.md](./deployment.md) | Production deployment principles: secrets, persistent storage, the single-writer constraint, TLS, CI/CD |
+| [aws-deployment.md](./aws-deployment.md) | Concrete AWS reference architecture (ECS Fargate/ALB/EFS/ECR), CloudFormation stack, bootstrap steps |
 
 Implementation status and what's still deferred (policy corpus content, tuned prompts, filled-in
 test scenarios) are tracked in the root [README.md](../README.md).

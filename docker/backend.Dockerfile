@@ -23,6 +23,17 @@ COPY backend/data ./data
 
 ENV PYTHONUNBUFFERED=1
 
+# Runs as a non-root user in every environment, not just AWS/production — least privilege by
+# default rather than an opt-in hardening step. /app/data is chowned here, before it ever
+# becomes a volume mount point, specifically because Docker seeds a fresh named volume (or EFS
+# access point, in the ECS deployment — see docs/aws-deployment.md) from the image directory's
+# existing content *and ownership* on first mount; chowning after the fact wouldn't reach data
+# written into the volume afterward.
+RUN useradd --create-home --uid 1000 --shell /usr/sbin/nologin appuser \
+    && mkdir -p /app/data \
+    && chown -R appuser:appuser /app
+USER appuser
+
 EXPOSE 8000
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=15s --retries=3 \

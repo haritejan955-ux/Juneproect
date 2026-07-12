@@ -158,6 +158,16 @@ docker compose exec backend python -m scripts.build_policy_index
 docker compose exec backend python -m scripts.generate_synthetic_claims
 ```
 
+## Deployment
+
+| Doc | Covers |
+|---|---|
+| [docs/environment-variables.md](docs/environment-variables.md) | Every backend and frontend variable: what it does, whether it's a secret, and how it's supplied in each environment |
+| [docs/deployment.md](docs/deployment.md) | Production deployment principles: secrets handling, persistent storage, the single-writer SQLite constraint, TLS termination, CI/CD pipeline overview, minimal non-AWS production path |
+| [docs/aws-deployment.md](docs/aws-deployment.md) | Concrete AWS reference architecture (ECS Fargate + ALB + EFS + ECR + Secrets Manager), bootstrap order, cost shape |
+| [infra/aws/ecs-stack.yaml](infra/aws/ecs-stack.yaml) | CloudFormation template provisioning the AWS architecture above |
+| [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | CD pipeline: builds/pushes both images to ECR and rolls out the ECS services on push to `main` |
+
 ## The 9-agent pipeline
 
 ```

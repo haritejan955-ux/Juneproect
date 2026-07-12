@@ -1,0 +1,718 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: >
+  US Insurance Claim Processing Agent — ECS Fargate deployment.
+  Provisions a dedicated VPC, ECR repositories, an ECS Fargate cluster running the backend
+  and frontend as two services behind a shared Application Load Balancer, an EFS file system
+  for the backend's persistent SQLite database and FAISS indices, and placeholder Secrets
+  Manager entries for the LLM/API-key secrets. See docs/aws-deployment.md for the full
+  architecture description, bootstrap order, and rationale for each choice made here.
+
+Parameters:
+  ProjectName:
+    Type: String
+    Default: claims-agent
+    Description: Short name used to prefix/tag every resource this stack creates.
+
+  BackendImage:
+    Type: String
+    Description: >
+      Full ECR image URI (with tag) for the backend, e.g.
+      123456789012.dkr.ecr.us-east-1.amazonaws.com/claims-agent-backend:latest.
+      Passed by the deploy workflow (.github/workflows/deploy.yml) on every deploy; on first
+      stack creation, point this at any tag already pushed to the ECR repo this stack creates
+      — see the bootstrap order in docs/aws-deployment.md.
+
+  FrontendImage:
+    Type: String
+    Description: Full ECR image URI (with tag) for the frontend. Same bootstrap note as BackendImage.
+
+  VpcCidr:
+    Type: String
+    Default: 10.42.0.0/16
+
+  PublicSubnet1Cidr:
+    Type: String
+    Default: 10.42.0.0/24
+
+  PublicSubnet2Cidr:
+    Type: String
+    Default: 10.42.1.0/24
+
+  PrivateSubnet1Cidr:
+    Type: String
+    Default: 10.42.10.0/24
+
+  PrivateSubnet2Cidr:
+    Type: String
+    Default: 10.42.11.0/24
+
+  FrontendDesiredCount:
+    Type: Number
+    Default: 2
+    Description: >
+      The frontend is stateless and safe to run as multiple replicas. The backend is not — see
+      BackendDesiredCount below.
+
+  BackendDesiredCount:
+    Type: Number
+    Default: 1
+    AllowedValues: [1]
+    Description: >
+      Fixed at 1 and not meant to be raised. The backend writes to a single SQLite file on EFS
+      (docs/design-decisions.md decision #3): two backend tasks writing concurrently would
+      corrupt claim data, not just contend for a lock. Scaling the backend requires migrating
+      off SQLite first, which is out of scope for this stack — see docs/deployment.md section 4.
+
+  CertificateArn:
+    Type: String
+    Default: ""
+    Description: >
+      ACM certificate ARN for the ALB's HTTPS listener. Leave blank to deploy with an HTTP-only
+      listener (fine for a first bring-up or an internal-only deployment); see
+      docs/aws-deployment.md for why TLS termination belongs at the ALB, not in either container.
+
+  LogRetentionDays:
+    Type: Number
+    Default: 30
+
+Conditions:
+  HasCertificate: !Not [!Equals [!Ref CertificateArn, ""]]
+
+Resources:
+  # ─────────────────────────────────────────── Networking ───────────────────────────────────
+  Vpc:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref VpcCidr
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-vpc"
+
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-igw"
+
+  GatewayAttachment:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref Vpc
+      InternetGatewayId: !Ref InternetGateway
+
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-1"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PublicSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-2"
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet1Cidr
+      AvailabilityZone: !Select [0, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-1"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref Vpc
+      CidrBlock: !Ref PrivateSubnet2Cidr
+      AvailabilityZone: !Select [1, !GetAZs ""]
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-2"
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-public-rt"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: GatewayAttachment
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  NatEip:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  # Single NAT gateway, not one per AZ — this stack optimizes for a straightforward, inexpensive
+  # first deployment (docs/aws-deployment.md explains the tradeoff), not multi-AZ NAT redundancy.
+  # A NAT outage would affect outbound calls (LLM APIs) from both AZs' private subnets equally;
+  # inbound traffic via the ALB and EFS access within the VPC are unaffected either way.
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatEip.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-nat"
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref Vpc
+      Tags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-private-rt"
+
+  PrivateRoute:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+
+  PrivateSubnet1RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnet2RouteAssoc:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  # ────────────────────────────────────────── Security groups ───────────────────────────────
+  AlbSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: ALB — internet-facing, 80/443 only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+        - IpProtocol: tcp
+          FromPort: 443
+          ToPort: 443
+          CidrIp: 0.0.0.0/0
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  BackendServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Backend ECS tasks — port 8000 from the ALB only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8000
+          ToPort: 8000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  FrontendServiceSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Frontend ECS tasks — port 3000 from the ALB only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref AlbSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  EfsSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: EFS mount targets — NFS from the backend service only
+      VpcId: !Ref Vpc
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 2049
+          ToPort: 2049
+          SourceSecurityGroupId: !Ref BackendServiceSecurityGroup
+      SecurityGroupEgress:
+        - IpProtocol: -1
+          CidrIp: 0.0.0.0/0
+
+  # ────────────────────────────────────────────── EFS ────────────────────────────────────────
+  # Backs /app/data — the SQLite database and FAISS indices — so the volume survives task
+  # replacement the same way docker-compose's backend_data named volume does locally. See
+  # docs/deployment.md section 3.
+  FileSystem:
+    Type: AWS::EFS::FileSystem
+    Properties:
+      Encrypted: true
+      PerformanceMode: generalPurpose
+      ThroughputMode: bursting
+      FileSystemTags:
+        - Key: Name
+          Value: !Sub "${ProjectName}-data"
+
+  MountTarget1:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PrivateSubnet1
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  MountTarget2:
+    Type: AWS::EFS::MountTarget
+    Properties:
+      FileSystemId: !Ref FileSystem
+      SubnetId: !Ref PrivateSubnet2
+      SecurityGroups: [!Ref EfsSecurityGroup]
+
+  # uid/gid 1000 matches `appuser` created in docker/backend.Dockerfile — the access point
+  # creates its root directory owned by that user, so the container can write to it immediately
+  # without a chown sidecar step.
+  AccessPoint:
+    Type: AWS::EFS::AccessPoint
+    Properties:
+      FileSystemId: !Ref FileSystem
+      PosixUser:
+        Uid: "1000"
+        Gid: "1000"
+      RootDirectory:
+        Path: /claims-data
+        CreationInfo:
+          OwnerUid: "1000"
+          OwnerGid: "1000"
+          Permissions: "0755"
+
+  # ────────────────────────────────────────────── ECR ────────────────────────────────────────
+  BackendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}-backend"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: >
+          {"rules":[{"rulePriority":1,"description":"Keep last 20 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":20},
+          "action":{"type":"expire"}}]}
+
+  FrontendRepository:
+    Type: AWS::ECR::Repository
+    Properties:
+      RepositoryName: !Sub "${ProjectName}-frontend"
+      ImageScanningConfiguration:
+        ScanOnPush: true
+      LifecyclePolicy:
+        LifecyclePolicyText: >
+          {"rules":[{"rulePriority":1,"description":"Keep last 20 images",
+          "selection":{"tagStatus":"any","countType":"imageCountMoreThan","countNumber":20},
+          "action":{"type":"expire"}}]}
+
+  # ────────────────────────────────────────────── Secrets ────────────────────────────────────
+  # Placeholder values on stack creation — CloudFormation cannot hold real secrets in a template
+  # parameter without them ending up in plaintext in the stack's event history. Populate the real
+  # values via `aws secretsmanager put-secret-value` immediately after the stack first creates
+  # these (see the bootstrap steps in docs/aws-deployment.md); CloudFormation will not overwrite
+  # a secret's value on subsequent stack updates unless this resource definition itself changes.
+  ApiKeysSecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/API_KEYS"
+      Description: JSON array of accepted X-API-Key values — see docs/environment-variables.md
+      SecretString: '["REPLACE_ME"]'
+
+  OpenAiApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/OPENAI_API_KEY"
+      SecretString: "REPLACE_ME"
+
+  AnthropicApiKeySecret:
+    Type: AWS::SecretsManager::Secret
+    Properties:
+      Name: !Sub "${ProjectName}/ANTHROPIC_API_KEY"
+      SecretString: "REPLACE_ME"
+
+  # ─────────────────────────────────────────── IAM ───────────────────────────────────────────
+  TaskExecutionRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      ManagedPolicyArns:
+        - arn:aws:iam::aws:policy/service-role/AmazonECSTaskExecutionRolePolicy
+      Policies:
+        - PolicyName: ReadClaimsAgentSecrets
+          PolicyDocument:
+            Version: "2012-10-17"
+            Statement:
+              - Effect: Allow
+                Action: secretsmanager:GetSecretValue
+                Resource:
+                  - !Ref ApiKeysSecret
+                  - !Ref OpenAiApiKeySecret
+                  - !Ref AnthropicApiKeySecret
+
+  BackendTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+      # No permissions beyond the assume-role trust: the backend container makes no AWS API
+      # calls of its own (its only "AWS integration" is the EFS mount, which is authorized by
+      # security group + access point, not IAM, and CloudWatch Logs, which the execution role —
+      # not this task role — handles). Least privilege: an empty task role is the correct
+      # default, not a placeholder for something unfinished.
+
+  FrontendTaskRole:
+    Type: AWS::IAM::Role
+    Properties:
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+        Statement:
+          - Effect: Allow
+            Principal:
+              Service: ecs-tasks.amazonaws.com
+            Action: sts:AssumeRole
+
+  # ─────────────────────────────────────────── Logs ──────────────────────────────────────────
+  BackendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/backend"
+      RetentionInDays: !Ref LogRetentionDays
+
+  FrontendLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub "/ecs/${ProjectName}/frontend"
+      RetentionInDays: !Ref LogRetentionDays
+
+  # ─────────────────────────────────────────── ECS ───────────────────────────────────────────
+  Cluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Sub "${ProjectName}-cluster"
+      ClusterSettings:
+        - Name: containerInsights
+          Value: enabled
+
+  BackendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-backend"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "512"
+      Memory: "1024"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt BackendTaskRole.Arn
+      Volumes:
+        - Name: claims-data
+          EFSVolumeConfiguration:
+            FilesystemId: !Ref FileSystem
+            TransitEncryption: ENABLED
+            AuthorizationConfig:
+              AccessPointId: !Ref AccessPoint
+      ContainerDefinitions:
+        - Name: backend
+          Image: !Ref BackendImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 8000
+          MountPoints:
+            - SourceVolume: claims-data
+              ContainerPath: /app/data
+          Environment:
+            - Name: DATABASE_URL
+              Value: sqlite:////app/data/claims.db
+            - Name: VECTOR_INDEX_DIR
+              Value: /app/data/indices
+            - Name: POLICY_CORPUS_DIR
+              Value: /app/data/policy_corpus
+            - Name: SYNTHETIC_CLAIMS_DIR
+              Value: /app/data/synthetic_claims
+            - Name: UPLOAD_STORAGE_DIR
+              Value: /app/data/uploads
+            - Name: APP_ENV
+              Value: production
+            - Name: LOG_LEVEL
+              Value: INFO
+            # Must be the frontend's real public origin — see docs/deployment.md section 5.
+            # Set via a stack update once the ALB DNS name (or custom domain) is known; the ALB
+            # DNS name itself is a stack Output for exactly this reason.
+            - Name: CORS_ORIGINS
+              Value: !Sub '["http://${LoadBalancer.DNSName}"]'
+          Secrets:
+            - Name: API_KEYS
+              ValueFrom: !Ref ApiKeysSecret
+            - Name: OPENAI_API_KEY
+              ValueFrom: !Ref OpenAiApiKeySecret
+            - Name: ANTHROPIC_API_KEY
+              ValueFrom: !Ref AnthropicApiKeySecret
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref BackendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: backend
+
+  FrontendTaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Sub "${ProjectName}-frontend"
+      RequiresCompatibilities: [FARGATE]
+      NetworkMode: awsvpc
+      Cpu: "256"
+      Memory: "512"
+      ExecutionRoleArn: !GetAtt TaskExecutionRole.Arn
+      TaskRoleArn: !GetAtt FrontendTaskRole.Arn
+      ContainerDefinitions:
+        - Name: frontend
+          Image: !Ref FrontendImage
+          Essential: true
+          PortMappings:
+            - ContainerPort: 3000
+          # No environment/secrets here on purpose: NEXT_PUBLIC_* values are compiled into this
+          # image at build time by the CD pipeline (.github/workflows/deploy.yml) — there is
+          # nothing left to configure at task-start. See docs/environment-variables.md.
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-group: !Ref FrontendLogGroup
+              awslogs-region: !Ref AWS::Region
+              awslogs-stream-prefix: frontend
+
+  # ─────────────────────────────────────────── ALB ───────────────────────────────────────────
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Name: !Sub "${ProjectName}-alb"
+      Scheme: internet-facing
+      Subnets: [!Ref PublicSubnet1, !Ref PublicSubnet2]
+      SecurityGroups: [!Ref AlbSecurityGroup]
+
+  BackendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-backend-tg"
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 8000
+      TargetType: ip
+      HealthCheckPath: /health
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+      # Long-lived WebSocket connections (/ws/v1/claims/{id}/stream) need a target-group-level
+      # deregistration delay that won't cut an in-flight stream off mid-claim when a task rolls.
+      TargetGroupAttributes:
+        - Key: deregistration_delay.timeout_seconds
+          Value: "60"
+
+  FrontendTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      Name: !Sub "${ProjectName}-frontend-tg"
+      VpcId: !Ref Vpc
+      Protocol: HTTP
+      Port: 3000
+      TargetType: ip
+      HealthCheckPath: /
+      HealthCheckIntervalSeconds: 30
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 3
+
+  HttpListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 80
+      Protocol: HTTP
+      DefaultActions:
+        # Without a certificate, serve the app directly over HTTP so the stack is usable
+        # out of the box; docs/deployment.md section 5 covers adding a certificate afterward.
+        - !If
+          - HasCertificate
+          - Type: redirect
+            RedirectConfig:
+              Protocol: HTTPS
+              Port: "443"
+              StatusCode: HTTP_301
+          - Type: forward
+            TargetGroupArn: !Ref FrontendTargetGroup
+
+  HttpsListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    Condition: HasCertificate
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: 443
+      Protocol: HTTPS
+      Certificates:
+        - CertificateArn: !Ref CertificateArn
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref FrontendTargetGroup
+
+  # Path-based routing to the backend — mirrors backend/app/main.py's router prefixes
+  # (/api/v1/*, /health, /ws/v1/*). Everything else falls through to each listener's
+  # DefaultActions above, which forward to the frontend.
+  HttpBackendRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Properties:
+      ListenerArn: !Ref HttpListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ["/api/*", "/health", "/health/*", "/ws/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  HttpsBackendRule:
+    Type: AWS::ElasticLoadBalancingV2::ListenerRule
+    Condition: HasCertificate
+    Properties:
+      ListenerArn: !Ref HttpsListener
+      Priority: 10
+      Conditions:
+        - Field: path-pattern
+          Values: ["/api/*", "/health", "/health/*", "/ws/*"]
+      Actions:
+        - Type: forward
+          TargetGroupArn: !Ref BackendTargetGroup
+
+  BackendService:
+    Type: AWS::ECS::Service
+    DependsOn: [HttpListener]
+    Properties:
+      ServiceName: !Sub "${ProjectName}-backend"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref BackendTaskDefinition
+      DesiredCount: !Ref BackendDesiredCount
+      LaunchType: FARGATE
+      # Replace-then-drain, not N-at-once: see the BackendDesiredCount parameter description
+      # and docs/deployment.md section 4 (single-writer SQLite constraint). A brief gap in
+      # backend availability during deploy is the accepted tradeoff, not two tasks writing to
+      # the same database file concurrently.
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 0
+        MaximumPercent: 100
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+          SecurityGroups: [!Ref BackendServiceSecurityGroup]
+      LoadBalancers:
+        - ContainerName: backend
+          ContainerPort: 8000
+          TargetGroupArn: !Ref BackendTargetGroup
+      HealthCheckGracePeriodSeconds: 30
+
+  FrontendService:
+    Type: AWS::ECS::Service
+    DependsOn: [HttpListener]
+    Properties:
+      ServiceName: !Sub "${ProjectName}-frontend"
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref FrontendTaskDefinition
+      DesiredCount: !Ref FrontendDesiredCount
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MinimumHealthyPercent: 100
+        MaximumPercent: 200
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: DISABLED
+          Subnets: [!Ref PrivateSubnet1, !Ref PrivateSubnet2]
+          SecurityGroups: [!Ref FrontendServiceSecurityGroup]
+      LoadBalancers:
+        - ContainerName: frontend
+          ContainerPort: 3000
+          TargetGroupArn: !Ref FrontendTargetGroup
+      HealthCheckGracePeriodSeconds: 30
+
+Outputs:
+  LoadBalancerDnsName:
+    Description: Public URL of the application (put behind a custom domain/CNAME as needed).
+    Value: !GetAtt LoadBalancer.DNSName
+
+  BackendRepositoryUri:
+    Value: !GetAtt BackendRepository.RepositoryUri
+
+  FrontendRepositoryUri:
+    Value: !GetAtt FrontendRepository.RepositoryUri
+
+  ClusterName:
+    Value: !Ref Cluster
+
+  BackendServiceName:
+    Value: !GetAtt BackendService.Name
+
+  FrontendServiceName:
+    Value: !GetAtt FrontendService.Name
+
+  BackendTaskDefinitionFamily:
+    Description: >
+      Task definition family to pass to `aws ecs describe-task-definition` when deploying a new
+      image (.github/workflows/deploy.yml) — kept as an explicit Output rather than assumed equal
+      to BackendServiceName, even though this template currently does give them the same value.
+    Value: !Sub "${ProjectName}-backend"
+
+  FrontendTaskDefinitionFamily:
+    Value: !Sub "${ProjectName}-frontend"
+
+  FileSystemId:
+    Value: !Ref FileSystem
