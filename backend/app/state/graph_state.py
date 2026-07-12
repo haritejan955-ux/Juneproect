@@ -2,9 +2,19 @@
 
 Every agent node reads a subset of these fields and returns a partial update
 containing only the fields it owns (see docs/agent-architecture.md for the
-full ownership table). `audit_log` is the one field every node writes to; it
-uses the `operator.add` reducer so LangGraph appends each node's new entries
-instead of one node's write overwriting another's.
+full ownership table). `audit_log` and `conversation_history` are the two
+fields that accumulate rather than overwrite; both use the `operator.add`
+reducer so LangGraph appends new entries instead of one write clobbering
+another's.
+
+Field-level detail that no downstream node actually consumes (the specific
+regex patterns an injection matched, which exact chunk had a PII hit) is
+deliberately kept OUT of this schema and pushed into `audit_log` entry
+`details` instead — see `app.security.pii_redactor.PIIFlag` and
+`app.security.injection_detector.SecurityFlags`, which are the return types
+of the detection functions but are not themselves state fields. What lands
+in `GraphState` is the small set of booleans/scores routing and the API
+actually need: `pii_detected`, `security_flag`, `fraud_score`.
 """
 
 import operator
@@ -14,9 +24,12 @@ Intent = Literal["coverage_check", "denial_appeal", "fraud_check", "obligation_l
 Decision = Literal["approved", "partial_approved", "denied"]
 Severity = Literal["low", "medium", "high"]
 FraudSignalType = Literal["duplicate_billing", "upcoding", "date_conflict", "unbundling"]
+# "claim_document" here is a per-chunk *source tag* on a RetrievedChunk (this chunk came from
+# the claimant's own upload) — unrelated to the GraphState.claim_document field below, which
+# holds the raw uploaded files themselves. Same word, two different things; see each docstring.
 RetrievalSource = Literal["claim_document", "policy_corpus", "historical_decision"]
-PIIType = Literal["SSN", "DOB", "EIN"]
 LineItemStatus = Literal["approved", "denied"]
+ConversationRole = Literal["claimant", "assistant"]
 
 
 class AuditLogEntry(TypedDict):
@@ -41,12 +54,6 @@ class DocumentChunk(TypedDict):
     preserved_codes: list[str]
 
 
-class PIIFlag(TypedDict):
-    chunk_id: str
-    pii_type: PIIType
-    field_label: str | None
-
-
 class RetrievedChunk(TypedDict):
     text: str
     source: RetrievalSource
@@ -54,13 +61,6 @@ class RetrievedChunk(TypedDict):
     section: str | None
     doc_title: str | None
     low_confidence: bool
-
-
-class SecurityFlags(TypedDict):
-    injection_detected: bool
-    heuristic_matched_patterns: list[str]
-    llm_confidence: float
-    llm_reasoning: str | None
 
 
 class CoverageLineItem(TypedDict):
@@ -84,6 +84,18 @@ class Citation(TypedDict):
     excerpt: str
 
 
+class ConversationTurn(TypedDict):
+    """One message in the claimant/assistant dispute thread. Written by the
+    dispute flow (`app.services.dispute_service`) via `graph.aupdate_state`
+    against the claim's existing checkpointed thread — never by a node
+    inside the main 9-agent run, since disputes don't re-enter that graph
+    (see docs/memory-architecture.md section 3)."""
+
+    role: ConversationRole
+    content: str
+    timestamp: str
+
+
 class FinalDecision(TypedDict):
     claim_id: str
     status: Literal["approved", "partial_approved", "denied", "blocked"]
@@ -103,12 +115,17 @@ class GraphState(TypedDict, total=False):
     claim_id: str
     claimant_id: str
     query: str
-    raw_documents: list[RawDocument]
+    claim_document: list[RawDocument]
+    """The uploaded file(s) for this claim — CMS-1500, EOB, accident report, denial letter can
+    all be part of one submission, hence a list despite the singular field name."""
 
     # --- [1] Document Preprocessor ---
-    document_chunks: list[DocumentChunk]
+    chunks: list[DocumentChunk]
     document_metadata: dict
-    pii_flags: list[PIIFlag]
+    pii_detected: bool
+    """True if any chunk matched a PII pattern near a recognized field label. The specific
+    chunk/type/label detail is not carried in state — it's written to this node's audit_log
+    entry instead, since no downstream node branches on which specific field was flagged."""
 
     # --- [2] Intent Analyzer ---
     intent: Intent
@@ -120,26 +137,32 @@ class GraphState(TypedDict, total=False):
     low_confidence_retrieval: bool
 
     # --- [4] Security Checker ---
-    security_flags: SecurityFlags
-    injection_detected: bool
+    security_flag: bool
+    """The hybrid (heuristic OR LLM-classifier) hard-block signal that `route_after_security`
+    reads. Per-layer detail (which regex matched, the LLM's confidence/reasoning) is written to
+    this node's audit_log entry, not stored here — routing only ever needs the boolean."""
     redacted_chunks: list[RetrievedChunk]
 
     # --- [5] Coverage Validator ---
-    coverage_map: list[CoverageLineItem]
-    coverage_citations: list[Citation]
+    coverage: list[CoverageLineItem]
+    citations: list[Citation]
 
     # --- [6] Fraud Detector ---
     fraud_signals: list[FraudSignal]
+    fraud_score: float
+    """Aggregate 0.0-1.0 score derived from `fraud_signals` (highest signal severity mapped to a
+    number; 0.0 if no signals fired) — a single sortable/thresholdable value for the API and
+    frontend, distinct from the itemized `fraud_signals` list itself."""
     attorney_flag: bool
 
     # --- [7] Answer Synthesizer ---
-    draft_decision: Decision
+    decision: Decision
     justification: str
     disclaimer: str
 
     # --- [8] Self-Critic ---
-    critic_score: float
-    critique: str
+    confidence: float
+    self_critique: str
     retry_count: int
     low_confidence: bool
 
@@ -148,3 +171,7 @@ class GraphState(TypedDict, total=False):
 
     # --- shared, accumulating ---
     audit_log: Annotated[list[AuditLogEntry], operator.add]
+    conversation_history: Annotated[list[ConversationTurn], operator.add]
+    """The dispute Q&A thread for this claim. Empty for the duration of the main 9-node run;
+    appended to by the dispute flow via `graph.aupdate_state` against this claim's thread_id,
+    after the claim already has a finalized decision — see docs/memory-architecture.md."""

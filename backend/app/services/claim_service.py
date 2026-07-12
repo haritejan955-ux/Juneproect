@@ -108,9 +108,10 @@ class ClaimService:
             "claim_id": claim_id,
             "claimant_id": claimant_external_ref,
             "query": query,
-            "raw_documents": raw_documents,
+            "claim_document": raw_documents,
             "retry_count": 0,
             "audit_log": [],
+            "conversation_history": [],
         }
 
         try:

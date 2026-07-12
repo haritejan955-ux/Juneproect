@@ -36,17 +36,17 @@ The state-overwrite failure mode the spec warns about ("no agent re-fetches data
 
 | # | Agent | Reads from state | Writes to state (owns) | Node type |
 |---|---|---|---|---|
-| 1 | Document Preprocessor | `raw_documents`, `query` | `parsed_documents`, `document_chunks`, `pii_flags`, `document_metadata` | LLM-free (deterministic parsing) |
+| 1 | Document Preprocessor | `claim_document`, `query` | `chunks`, `document_metadata`, `pii_detected` | LLM-free (deterministic parsing) |
 | 2 | Intent Analyzer | `query`, `document_metadata` | `intent`, `intent_confidence`, `extracted_entities` | LLM (structured output) |
-| 3 | RAG Retriever | `document_chunks`, `intent`, `extracted_entities` | `retrieved_chunks` (tagged by source: `claim_document` \| `policy_corpus` \| `historical_decision`), `low_confidence_retrieval` | Vector search, no LLM |
-| 4 | Security Checker | `document_chunks`, `retrieved_chunks` | `security_flags`, `injection_detected`, `redacted_chunks` | Hybrid: regex + LLM classifier |
-| 5 | Coverage Validator | `retrieved_chunks`, `redacted_chunks`, `extracted_entities` | `coverage_map`, `coverage_citations` | LLM (structured output) |
-| 6 | Fraud Detector | `redacted_chunks`, `coverage_map` | `fraud_signals`, `attorney_flag` (set-only, never unset) | LLM (structured output) |
-| 7 | Answer Synthesizer | `coverage_map`, `fraud_signals`, `retrieved_chunks`, `critique` (on retry) | `draft_decision`, `justification`, `disclaimer` | LLM (structured output) |
-| 8 | Self-Critic | `draft_decision`, `justification`, `retrieved_chunks` | `critic_score`, `critique`, `retry_count`, `low_confidence` | LLM (structured output) |
+| 3 | RAG Retriever | `chunks`, `intent`, `extracted_entities` | `retrieved_chunks` (tagged by source: `claim_document` \| `policy_corpus` \| `historical_decision`), `low_confidence_retrieval` | Vector search, no LLM |
+| 4 | Security Checker | `chunks`, `retrieved_chunks` | `security_flag`, `redacted_chunks` | Hybrid: regex + LLM classifier |
+| 5 | Coverage Validator | `retrieved_chunks`, `redacted_chunks`, `extracted_entities` | `coverage`, `citations` | LLM (structured output) |
+| 6 | Fraud Detector | `redacted_chunks`, `coverage` | `fraud_signals`, `fraud_score`, `attorney_flag` (set-only, never unset) | LLM (structured output) |
+| 7 | Answer Synthesizer | `coverage`, `fraud_signals`, `retrieved_chunks`, `self_critique` (on retry) | `decision`, `justification`, `disclaimer` | LLM (structured output) |
+| 8 | Self-Critic | `decision`, `justification`, `retrieved_chunks` | `confidence`, `self_critique`, `retry_count`, `low_confidence` | LLM (structured output) |
 | 9 | Final Output | everything above | `final_decision` (assembled, read-only from this point) | LLM-free (assembly only) |
 
-Every node, regardless of type, also appends to `audit_log` (shared, append-only list — see [memory-architecture.md](./memory-architecture.md)) via the single `append_audit()` helper. No node is exempt; this is how the acceptance criterion *"audit_log contains a timestamped entry from every agent"* is guaranteed rather than hoped for.
+Every node, regardless of type, also appends to `audit_log` (shared, append-only list — see [memory-architecture.md](./memory-architecture.md)) via the single `append_audit()` helper. No node is exempt; this is how the acceptance criterion *"audit_log contains a timestamped entry from every agent"* is guaranteed rather than hoped for. `conversation_history` is the other accumulating field — appended to by the dispute flow via `graph.aupdate_state`, not by any node in this table; see [langgraph-design.md](./langgraph-design.md) section 9.
 
 ## 3. Why this decomposition and not fewer/more agents
 

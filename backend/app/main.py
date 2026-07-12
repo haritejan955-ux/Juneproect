@@ -84,6 +84,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         policy_corpus_store=policy_corpus_store,
         rag_top_k=settings.rag_top_k,
         rag_similarity_threshold=settings.rag_similarity_threshold,
+        graph=graph,
     )
 
     yield

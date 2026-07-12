@@ -9,8 +9,23 @@ docs/security-architecture.md section 4.
 """
 
 import re
+from typing import Literal, TypedDict
 
-from app.state.graph_state import DocumentChunk, PIIFlag
+from app.state.graph_state import DocumentChunk
+
+PIIType = Literal["SSN", "DOB", "EIN"]
+
+
+class PIIFlag(TypedDict):
+    """Per-chunk detection detail. Not a GraphState field — the node that calls `flag_pii`
+    reduces this to a single `pii_detected: bool` for state and writes this full list into its
+    audit_log entry's `details` instead, since no downstream node branches on which specific
+    chunk/field was flagged (see docs/security-architecture.md section 4)."""
+
+    chunk_id: str
+    pii_type: PIIType
+    field_label: str | None
+
 
 SSN_DASHED_PATTERN = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 SSN_BARE_PATTERN = re.compile(r"\b\d{9}\b")

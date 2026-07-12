@@ -7,12 +7,23 @@ docs/security-architecture.md section 3 for the full rationale.
 """
 
 import re
+from typing import TypedDict
 
 from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 
 from app.prompts.security_checker_prompt import build_security_checker_prompt
-from app.state.graph_state import SecurityFlags
+
+
+class SecurityFlags(TypedDict):
+    """Full hybrid-detection result. Not a GraphState field — the Security Checker node reduces
+    this to a single `security_flag: bool` for state (all `route_after_security` needs) and
+    writes this full dict into its audit_log entry's `details` for forensic detail."""
+
+    injection_detected: bool
+    heuristic_matched_patterns: list[str]
+    llm_confidence: float
+    llm_reasoning: str | None
 
 _INSTRUCTION_OVERRIDE_PATTERNS = [
     re.compile(r"\bignore\s+(all\s+)?(the\s+)?(previous|prior|above)\s+instructions?\b", re.I),

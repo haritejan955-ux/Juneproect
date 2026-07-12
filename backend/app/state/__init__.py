@@ -1,19 +1,29 @@
 from app.state.graph_state import (
     AuditLogEntry,
+    Citation,
+    ConversationTurn,
     CoverageLineItem,
+    Decision,
+    DocumentChunk,
+    FinalDecision,
     FraudSignal,
     GraphState,
-    PIIFlag,
+    Intent,
+    RawDocument,
     RetrievedChunk,
-    SecurityFlags,
 )
 
 __all__ = [
     "AuditLogEntry",
+    "Citation",
+    "ConversationTurn",
     "CoverageLineItem",
+    "Decision",
+    "DocumentChunk",
+    "FinalDecision",
     "FraudSignal",
     "GraphState",
-    "PIIFlag",
+    "Intent",
+    "RawDocument",
     "RetrievedChunk",
-    "SecurityFlags",
 ]

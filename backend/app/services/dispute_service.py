@@ -8,11 +8,14 @@ doesn't need. See docs/memory-architecture.md section 3.
 """
 
 from langchain_core.language_models import BaseChatModel
+from langgraph.graph.state import CompiledStateGraph
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.exceptions import ClaimNotFoundError
+from app.memory.checkpointer import thread_config
 from app.memory.repository import ClaimRepository
 from app.prompts.dispute_responder_prompt import build_dispute_responder_prompt
+from app.state.graph_state import ConversationTurn
 from app.vectorstore.base import VectorStore
 
 
@@ -24,12 +27,18 @@ class DisputeService:
         policy_corpus_store: VectorStore,
         rag_top_k: int,
         rag_similarity_threshold: float,
+        graph: CompiledStateGraph,
     ) -> None:
         self._chat_model = chat_model
         self._session_factory = session_factory
         self._policy_corpus_store = policy_corpus_store
         self._rag_top_k = rag_top_k
         self._rag_similarity_threshold = rag_similarity_threshold
+        self._graph = graph
+        """Not used to re-run the pipeline (see module docstring) — only to append this
+        exchange to `GraphState.conversation_history` on the claim's existing checkpointed
+        thread via `aupdate_state`, so the dispute thread is genuinely part of the claim's
+        shared state, not only a SQL-only side record."""
 
     async def post_message(self, claim_id: str, message: str) -> dict:
         with self._session_factory() as session:
@@ -85,6 +94,26 @@ class DisputeService:
                         "timestamp": assistant_message.timestamp.isoformat(),
                     }
                 ],
+            )
+
+            # SQL (dispute_messages, above) is the durable long-term record. This second write
+            # appends the same two turns to conversation_history on the claim's *existing*
+            # checkpointed thread — the claim was already run through the graph to reach a
+            # decision, so this thread is guaranteed to exist; aupdate_state patches state
+            # without executing any node, i.e. without re-processing the original documents.
+            claimant_turn: ConversationTurn = {
+                "role": "claimant",
+                "content": message,
+                "timestamp": assistant_message.timestamp.isoformat(),
+            }
+            assistant_turn: ConversationTurn = {
+                "role": "assistant",
+                "content": reply_text,
+                "timestamp": assistant_message.timestamp.isoformat(),
+            }
+            await self._graph.aupdate_state(
+                thread_config(claim_id),
+                {"conversation_history": [claimant_turn, assistant_turn]},
             )
 
             return {

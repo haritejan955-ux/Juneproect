@@ -41,7 +41,7 @@ def build_self_critic_node(
 
         result = await critic.ainvoke(
             build_self_critic_prompt(
-                state.get("draft_decision", ""),
+                state.get("decision", ""),
                 state.get("justification", ""),
                 list(redacted_chunks),
             )
@@ -59,8 +59,8 @@ def build_self_critic_node(
         low_confidence = (not passed) and retry_count >= max_retries
 
         return {
-            "critic_score": overall_score,
-            "critique": result.critique,
+            "confidence": overall_score,
+            "self_critique": result.critique,
             "low_confidence": low_confidence,
             **audit_update(
                 AGENT_NAME,

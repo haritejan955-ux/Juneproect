@@ -16,14 +16,14 @@ def build_final_output_node() -> Callable[[GraphState], Awaitable[dict]]:
     async def final_output(state: GraphState) -> dict:
         final_decision: FinalDecision = {
             "claim_id": state["claim_id"],
-            "status": state.get("draft_decision", "denied"),
-            "confidence_score": state.get("critic_score", 0.0),
+            "status": state.get("decision", "denied"),
+            "confidence_score": state.get("confidence", 0.0),
             "low_confidence": state.get("low_confidence", False),
             "attorney_flag": state.get("attorney_flag", False),
             "justification": state.get("justification", ""),
-            "coverage_map": state.get("coverage_map", []),
+            "coverage_map": state.get("coverage", []),
             "fraud_signals": state.get("fraud_signals", []),
-            "citations": state.get("coverage_citations", []),
+            "citations": state.get("citations", []),
             "disclaimer": state.get("disclaimer", ""),
             "retry_count": state.get("retry_count", 0),
         }

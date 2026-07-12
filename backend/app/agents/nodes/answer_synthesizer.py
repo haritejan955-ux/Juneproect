@@ -40,16 +40,16 @@ def build_answer_synthesizer_node(
 
         result = await synthesizer.ainvoke(
             build_answer_synthesizer_prompt(
-                coverage_map=list(state.get("coverage_map", [])),
+                coverage_map=list(state.get("coverage", [])),
                 fraud_signals=list(state.get("fraud_signals", [])),
                 retrieved_chunks=list(redacted_chunks),
-                critique=state.get("critique"),
+                critique=state.get("self_critique"),
             )
         )
         assert isinstance(result, _SynthesisResult)
 
         return {
-            "draft_decision": result.decision,
+            "decision": result.decision,
             "justification": result.justification,
             "disclaimer": DISCLAIMER,
             **audit_update(

@@ -28,15 +28,14 @@ def build_rag_retriever_node(
 ) -> Callable[[GraphState], Awaitable[dict]]:
     async def rag_retriever(state: GraphState) -> dict:
         query = state["query"]
-        document_chunks = state.get("document_chunks", [])
+        chunks = state.get("chunks", [])
 
         per_claim_store = FaissVectorStore.ephemeral("per_claim", embeddings)
-        if document_chunks:
+        if chunks:
             per_claim_store.add_texts(
-                texts=[chunk["text"] for chunk in document_chunks],
+                texts=[chunk["text"] for chunk in chunks],
                 metadatas=[
-                    {"section": chunk["section"], "doc_type": chunk["doc_type"]}
-                    for chunk in document_chunks
+                    {"section": chunk["section"], "doc_type": chunk["doc_type"]} for chunk in chunks
                 ],
             )
 

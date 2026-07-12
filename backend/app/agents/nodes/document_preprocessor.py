@@ -24,11 +24,11 @@ def _extract_text(storage_path: str) -> str:
 
 def build_document_preprocessor_node() -> Callable[[GraphState], Awaitable[dict]]:
     async def document_preprocessor(state: GraphState) -> dict:
-        raw_documents = state.get("raw_documents", [])
+        claim_document = state.get("claim_document", [])
         all_chunks: list[DocumentChunk] = []
         doc_types_seen: set[str] = set()
 
-        for raw_doc in raw_documents:
+        for raw_doc in claim_document:
             text = _extract_text(raw_doc["storage_path"])
             doc_type = raw_doc["doc_type"]
             doc_types_seen.add(doc_type)
@@ -43,20 +43,27 @@ def build_document_preprocessor_node() -> Callable[[GraphState], Awaitable[dict]
                     )
                 )
 
+        # `pii_flags` (per-chunk detail: which chunk, which field label) is only ever consumed
+        # here, for the audit trail — GraphState only needs the boolean `pii_detected` for any
+        # future node/route to branch on. See PIIFlag's docstring in security/pii_redactor.py.
         pii_flags = flag_pii(all_chunks)
 
         return {
-            "document_chunks": all_chunks,
+            "chunks": all_chunks,
             "document_metadata": {
-                "document_count": len(raw_documents),
+                "document_count": len(claim_document),
                 "doc_types": sorted(doc_types_seen),
                 "chunk_count": len(all_chunks),
             },
-            "pii_flags": pii_flags,
+            "pii_detected": bool(pii_flags),
             **audit_update(
                 AGENT_NAME,
                 "parsed_and_chunked_documents",
-                {"chunk_count": len(all_chunks), "pii_flag_count": len(pii_flags)},
+                {
+                    "chunk_count": len(all_chunks),
+                    "pii_flag_count": len(pii_flags),
+                    "pii_flags": pii_flags,
+                },
             ),
         }
 

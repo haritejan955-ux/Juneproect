@@ -70,8 +70,8 @@ def build_coverage_validator_node(
         ]
 
         return {
-            "coverage_map": coverage_map,
-            "coverage_citations": citations,
+            "coverage": coverage_map,
+            "citations": citations,
             **audit_update(
                 AGENT_NAME, "validated_coverage", {"line_item_count": len(coverage_map)}
             ),
