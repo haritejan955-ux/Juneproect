@@ -50,6 +50,29 @@ class FakeChatModel:
         return self._result_or_exception
 
 
+class MultiSchemaFakeChatModel:
+    """Like `FakeChatModel`, but serves a different canned result per requested schema — needed
+    when a single test drives more than one node through the same `chat_model` instance (e.g. a
+    full-graph run, where Intent Analyzer and Security Checker's classifier each call
+    `with_structured_output` with a different schema). Raises `AssertionError` for an
+    unconfigured schema rather than returning `None` — a test relying on this fake should know
+    immediately if it exercised a node it didn't mean to."""
+
+    def __init__(self, by_schema: dict[type, object]) -> None:
+        self._by_schema = by_schema
+        self.runnables_by_schema: dict[type, FakeStructuredRunnable] = {}
+
+    def with_structured_output(self, schema: type) -> FakeStructuredRunnable:
+        if schema not in self._by_schema:
+            raise AssertionError(
+                f"MultiSchemaFakeChatModel has no configured response for {schema} — "
+                f"configured schemas: {list(self._by_schema)}"
+            )
+        runnable = FakeStructuredRunnable(self._by_schema[schema])
+        self.runnables_by_schema[schema] = runnable
+        return runnable
+
+
 class FakeEmbeddings:
     """Deterministic, dependency-free stand-in for `langchain_core.embeddings.Embeddings`.
     Returns a fixed-dimension vector derived from a hash of the input text — these tests
