@@ -33,6 +33,18 @@ class VectorDocStore(Protocol):
 
     def next_id(self, index_name: str) -> int: ...
 
+    def get_all(self, index_name: str) -> list[tuple[int, str, dict]]:
+        """Every (vector_id, text, metadata) currently stored under this index.
+
+        Two consumers: rebuilding the in-memory BM25 sparse index from the
+        persisted dense index at startup (BM25 itself is never serialized —
+        see vectorstore/bm25_index.py), and incremental-indexing dedup in
+        the ingestion scripts (checking a content hash against what's
+        already indexed before re-embedding). Cheap at this corpus's
+        scale; would need pagination well before it became a bottleneck.
+        """
+        ...
+
 
 class VectorStore(Protocol):
     """A single named collection of embedded chunks (one FAISS index)."""

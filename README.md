@@ -3,18 +3,22 @@
 A multi-agent LangGraph pipeline that processes US insurance claims: it parses uploaded claim
 documents, validates them against public-domain US policy rules, detects fraud signals, and
 produces a structured claim decision — 9 agents wired as a LangGraph `StateGraph` with
-conditional routing, a hybrid prompt-injection security gate, 3-source RAG, and a self-critique
-retry loop.
+conditional routing, a hybrid prompt-injection security gate, hybrid (dense+sparse) 3-source RAG
+with an embedding cache and incremental indexing, and a self-critique retry loop.
 
 ## Status
 
 This repository currently contains the **complete project skeleton**: every module, agent node,
 API route, database model, and frontend screen is wired end-to-end with real (not stubbed)
-control flow, and the full backend test suite (27 tests, including a full-app lifespan
-integration test) passes. What's intentionally *not* yet filled in:
+control flow, and the full backend test suite (102 tests, including a full-app lifespan
+integration test) passes. The RAG layer is production-shaped: hybrid dense+sparse retrieval with
+Reciprocal Rank Fusion, a populated 6-document policy corpus, a persistent embedding cache,
+genuinely incremental ingestion (verified: a re-run over an unchanged corpus makes zero new
+embedding calls), and an evaluation harness (`scripts/evaluate_retrieval.py`) comparing hybrid
+against dense-only recall. See [docs/vector-db-architecture.md](docs/vector-db-architecture.md).
 
-- The public-domain policy corpus (`backend/data/policy_corpus/`) is empty — see
-  [docs/design-decisions.md](docs/design-decisions.md) "Open items."
+What's intentionally *not* yet filled in:
+
 - Agent prompts are real and specific but not yet tuned/calibrated against the 5 required test
   scenarios.
 - The 5 test claim scenarios and the documented security-injection proof PDF are not yet built.
@@ -68,9 +72,15 @@ cp frontend/.env.example frontend/.env.local
 ```bash
 make backend-install
 make init-db
-make build-index      # builds the policy_corpus FAISS index from backend/data/policy_corpus/
+make build-index      # builds/updates the policy_corpus hybrid index (incremental — safe to re-run)
 make seed-claims       # generates + indexes synthetic historical claim decisions
 make backend-dev        # http://localhost:8000 — interactive docs at /docs
+```
+
+To evaluate retrieval quality (hybrid vs. dense-only recall@k against the policy corpus):
+
+```bash
+cd backend && python -m scripts.evaluate_retrieval
 ```
 
 ### 3. Frontend
@@ -83,7 +93,7 @@ make frontend-dev       # http://localhost:3000
 ### 4. Run the tests
 
 ```bash
-make backend-test       # 27 tests: unit, integration (real app lifespan), security
+make backend-test       # 102 tests: unit, integration (real app lifespan), security
 make frontend-typecheck
 make frontend-build
 ```
@@ -133,7 +143,7 @@ Non-negotiable criteria from the spec, and where each is implemented:
 - [x] All 9 LangGraph nodes correctly wired with conditional routing — `backend/app/agents/graph.py`
 - [x] Shared state flows without data loss across all agents — `backend/app/state/graph_state.py` (namespaced fields, `operator.add` audit_log reducer)
 - [x] Security Checker catches embedded prompt injection — hybrid heuristic + LLM classifier, `backend/app/security/injection_detector.py`; deterministic proof for the heuristic layer in `backend/tests/security/test_prompt_injection.py`
-- [x] RAG retrieves from all three sources with source metadata attached — `backend/app/agents/nodes/rag_retriever.py`
+- [x] RAG retrieves from all three sources with source metadata attached — `backend/app/agents/nodes/rag_retriever.py`, hybrid dense+sparse retrieval via `backend/app/vectorstore/hybrid_store.py`
 - [x] Self-Critic injects critique into Synthesizer on retry — `backend/app/prompts/answer_synthesizer_prompt.py` (critique is a required prompt-template field, not optional context)
 - [x] `retry_count` guard prevents infinite loops — `backend/app/agents/routing.py` (`route_after_critic` + dedicated `prepare_retry` node)
 - [x] Every claim decision cites a specific clause or statute — enforced at the structured-output schema level in `backend/app/agents/nodes/coverage_validator.py`
@@ -144,7 +154,7 @@ Non-negotiable criteria from the spec, and where each is implemented:
 
 - [x] GitHub repo with README and setup instructions
 - [x] LangGraph agent code — each node in its own file with its own system prompt
-- [x] RAG ingestion script + vector store setup using public corpus (`backend/scripts/build_policy_index.py`) — corpus content itself pending
+- [x] RAG ingestion script + vector store setup using public corpus — `backend/scripts/build_policy_index.py` (incremental, multi-format), 6-document representative corpus in `backend/data/policy_corpus/`
 - [x] FastAPI backend + WebSocket streaming endpoint
 - [x] React frontend with all 5 screens
 - [ ] 5 test claim scenarios (fraud, partial approval, denial, etc.) — `test_scenarios/` scaffolded, content pending

@@ -143,3 +143,18 @@ class VectorDocumentRecord(Base):
     vector_id: Mapped[int] = mapped_column(Integer, primary_key=True)
     text: Mapped[str] = mapped_column(Text)
     metadata_json: Mapped[str] = mapped_column(Text)
+
+
+class EmbeddingCacheRecord(Base):
+    """A previously-computed embedding, keyed by a hash of (model_name, text) so it survives
+    process restarts and is shared across ingestion runs, retrieval queries, and re-indexing —
+    see vectorstore/embedding_cache.py. Keyed by hash rather than the raw text itself: text can
+    be arbitrarily long (a whole chunk), and SQLite primary keys are more efficient short and
+    fixed-width."""
+
+    __tablename__ = "embedding_cache"
+
+    cache_key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    model_name: Mapped[str] = mapped_column(String(128))
+    embedding_json: Mapped[str] = mapped_column(Text)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now)

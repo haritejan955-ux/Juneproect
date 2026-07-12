@@ -21,12 +21,14 @@ from app.core.logging import configure_logging, get_logger
 from app.llm.provider import get_chat_model
 from app.memory.checkpointer import build_checkpointer
 from app.memory.database import create_db_engine, init_db, make_session_factory
+from app.memory.embedding_cache_store import SqlEmbeddingCacheStore
 from app.memory.vector_doc_store import SqlVectorDocStore
 from app.services.claim_service import ClaimService
 from app.services.dispute_service import DisputeService
 from app.services.streaming import StreamPublisher
+from app.vectorstore.embedding_cache import CachedEmbeddings
 from app.vectorstore.embeddings import get_embeddings
-from app.vectorstore.faiss_store import FaissVectorStore
+from app.vectorstore.hybrid_store import HybridVectorStore
 
 logger = get_logger(__name__)
 
@@ -42,13 +44,17 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     session_factory = make_session_factory(engine)
 
     chat_model = get_chat_model(settings)
-    embeddings = get_embeddings(settings)
+    embeddings = CachedEmbeddings(
+        inner=get_embeddings(settings),
+        store=SqlEmbeddingCacheStore(session_factory),
+        model_name=settings.openai_embedding_model,
+    )
     doc_store = SqlVectorDocStore(session_factory)
 
-    policy_corpus_store = FaissVectorStore.load_or_create(
+    policy_corpus_store = HybridVectorStore.load_or_create(
         settings.vector_index_dir, "policy_corpus", embeddings, doc_store
     )
-    historical_decisions_store = FaissVectorStore.load_or_create(
+    historical_decisions_store = HybridVectorStore.load_or_create(
         settings.vector_index_dir, "historical_decisions", embeddings, doc_store
     )
 

@@ -1,9 +1,10 @@
-"""[3] RAG Retriever — searches all three required sources, merges with
-source metadata attached, flags low-confidence matches instead of dropping
-them. See docs/vector-db-architecture.md section 4.
+"""[3] RAG Retriever — searches all three required sources using hybrid
+(dense + sparse) retrieval, merges with source metadata attached, flags
+low-confidence matches instead of dropping them. See
+docs/vector-db-architecture.md section 4.
 
 The per-claim index is built fresh, in-memory, on every run
-(`FaissVectorStore.ephemeral`) — it is never persisted, since this node
+(`HybridVectorStore.ephemeral`) — it is never persisted, since this node
 runs before Security Checker's PII redaction pass.
 """
 
@@ -16,7 +17,7 @@ from app.core.exceptions import VectorStoreError
 from app.core.logging import get_logger
 from app.state.graph_state import GraphState, RetrievedChunk
 from app.vectorstore.base import VectorStore
-from app.vectorstore.faiss_store import FaissVectorStore
+from app.vectorstore.hybrid_store import HybridVectorStore
 
 AGENT_NAME = "rag_retriever"
 
@@ -38,7 +39,7 @@ def build_rag_retriever_node(
             f"{AGENT_NAME}.started", extra={"claim_id": claim_id, "chunk_count": len(chunks)}
         )
 
-        per_claim_store = FaissVectorStore.ephemeral("per_claim", embeddings)
+        per_claim_store = HybridVectorStore.ephemeral("per_claim", embeddings)
         if chunks:
             try:
                 per_claim_store.add_texts(

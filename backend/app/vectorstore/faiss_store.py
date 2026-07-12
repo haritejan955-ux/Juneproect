@@ -43,6 +43,13 @@ class InMemoryVectorDocStore(VectorDocStore):
         self._counters[index_name] = current + 1
         return current
 
+    def get_all(self, index_name: str) -> list[tuple[int, str, dict]]:
+        return [
+            (vector_id, text, metadata)
+            for (name, vector_id), (text, metadata) in self._docs.items()
+            if name == index_name
+        ]
+
 
 class FaissVectorStore:
     index_name: str
@@ -75,9 +82,11 @@ class FaissVectorStore:
         self._index.add_with_ids(vectors, np.array(ids, dtype="int64"))
         return ids
 
-    def search(
-        self, query: str, k: int, threshold: float, source_label: str
-    ) -> list[ScoredChunk]:
+    def search_ids(self, query: str, k: int) -> list[tuple[int, float]]:
+        """Raw ranked (vector_id, cosine_similarity) pairs, best-first, with
+        no doc-store lookup and no threshold applied. This is the primitive
+        `search()` builds on, and what `HybridVectorStore` fuses with BM25's
+        ranking via Reciprocal Rank Fusion — see vectorstore/fusion.py."""
         if self._index.ntotal == 0:
             return []
 
@@ -86,22 +95,28 @@ class FaissVectorStore:
 
         scores, vector_ids = self._index.search(query_vector, min(k, self._index.ntotal))
 
+        return [
+            (int(vector_id), float(score))
+            for score, vector_id in zip(scores[0], vector_ids[0], strict=True)
+            if vector_id != -1
+        ]
+
+    def search(
+        self, query: str, k: int, threshold: float, source_label: str
+    ) -> list[ScoredChunk]:
         results: list[ScoredChunk] = []
-        for score, vector_id in zip(scores[0], vector_ids[0], strict=True):
-            if vector_id == -1:
-                continue
-            doc = self._doc_store.get(self.index_name, int(vector_id))
+        for vector_id, score in self.search_ids(query, k):
+            doc = self._doc_store.get(self.index_name, vector_id)
             if doc is None:
                 continue
             text, metadata = doc
-            score_f = float(score)
             results.append(
                 ScoredChunk(
                     text=text,
                     source=source_label,
-                    score=score_f,
+                    score=score,
                     metadata=metadata,
-                    low_confidence=score_f < threshold,
+                    low_confidence=score < threshold,
                 )
             )
         return results

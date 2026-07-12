@@ -6,8 +6,7 @@ call happens anywhere downstream. See docs/agent-architecture.md section 2.
 """
 
 from collections.abc import Awaitable, Callable
-
-import fitz  # PyMuPDF
+from pathlib import Path
 
 from app.core.audit import audit_update
 from app.core.exceptions import InvalidUploadError
@@ -15,15 +14,11 @@ from app.core.logging import get_logger
 from app.security.pii_redactor import flag_pii
 from app.state.graph_state import DocumentChunk, GraphState
 from app.vectorstore.chunking import chunk_by_clause
+from app.vectorstore.document_loading import load_document_text
 
 AGENT_NAME = "document_preprocessor"
 
 logger = get_logger(__name__)
-
-
-def _extract_text(storage_path: str) -> str:
-    with fitz.open(storage_path) as doc:
-        return "\n\n".join(page.get_text() for page in doc)
 
 
 def build_document_preprocessor_node() -> Callable[[GraphState], Awaitable[dict]]:
@@ -44,7 +39,7 @@ def build_document_preprocessor_node() -> Callable[[GraphState], Awaitable[dict]
             # corrupt or malformed PDF from one file must not crash the whole node when other
             # files in the same submission are fine. It's tracked and surfaced below instead.
             try:
-                text = _extract_text(raw_doc["storage_path"])
+                text = load_document_text(Path(raw_doc["storage_path"]))
             except Exception as exc:
                 logger.warning(
                     f"{AGENT_NAME}.file_parse_failed",

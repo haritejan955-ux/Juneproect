@@ -59,6 +59,12 @@ class FakeEmbeddings:
     def __init__(self, dimension: int = 1536, raise_on_call: BaseException | None = None) -> None:
         self._dimension = dimension
         self._raise_on_call = raise_on_call
+        # Tracks every text actually sent through — lets a test assert that a caching layer
+        # in front of this fake avoided a redundant call, not just that it returned the right
+        # vector (which a broken cache that fell through to the wrapped embeddings every time
+        # would also do).
+        self.embed_documents_calls: list[list[str]] = []
+        self.embed_query_calls: list[str] = []
 
     def _vector(self, text: str) -> list[float]:
         if self._raise_on_call is not None:
@@ -67,7 +73,25 @@ class FakeEmbeddings:
         return [((seed * (i + 1)) % 97) / 97.0 for i in range(self._dimension)]
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        self.embed_documents_calls.append(list(texts))
         return [self._vector(text) for text in texts]
 
     def embed_query(self, text: str) -> list[float]:
+        self.embed_query_calls.append(text)
         return self._vector(text)
+
+
+class FakeEmbeddingCacheStore:
+    """In-memory stand-in for `app.memory.embedding_cache_store.SqlEmbeddingCacheStore` —
+    same `get`/`put` surface, no database."""
+
+    def __init__(self) -> None:
+        self._entries: dict[str, list[float]] = {}
+        self.put_calls: list[tuple[str, str]] = []
+
+    def get(self, key: str) -> list[float] | None:
+        return self._entries.get(key)
+
+    def put(self, key: str, model_name: str, embedding: list[float]) -> None:
+        self._entries[key] = embedding
+        self.put_calls.append((key, model_name))

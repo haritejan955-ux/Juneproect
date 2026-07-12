@@ -48,3 +48,14 @@ class SqlVectorDocStore:
             )
             existing_ids = session.scalars(stmt).all()
             return (max(existing_ids) + 1) if existing_ids else 0
+
+    def get_all(self, index_name: str) -> list[tuple[int, str, dict]]:
+        with self._session_factory() as session:
+            stmt = select(VectorDocumentRecord).where(
+                VectorDocumentRecord.index_name == index_name
+            )
+            records = session.scalars(stmt).all()
+            return [
+                (record.vector_id, record.text, json.loads(record.metadata_json))
+                for record in records
+            ]

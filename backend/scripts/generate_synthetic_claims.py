@@ -1,6 +1,10 @@
 """Generates synthetic historical claim decisions and indexes them into the
-`historical_decisions` FAISS store — one of the three required RAG sources.
-See docs/vector-db-architecture.md.
+`historical_decisions` hybrid (dense + sparse) store — one of the three
+required RAG sources. See docs/vector-db-architecture.md.
+
+Incremental: a claim already present in the index (by `claim_id`) is
+skipped, so re-running this script after adding a new synthetic claim to
+`_SYNTHETIC_CLAIMS` only embeds and indexes the new one.
 
 Usage: python -m scripts.generate_synthetic_claims
 """
@@ -11,11 +15,15 @@ from pathlib import Path
 from app.config.settings import get_settings
 from app.core.logging import configure_logging, get_logger
 from app.memory.database import create_db_engine, init_db, make_session_factory
+from app.memory.embedding_cache_store import SqlEmbeddingCacheStore
 from app.memory.vector_doc_store import SqlVectorDocStore
+from app.vectorstore.embedding_cache import CachedEmbeddings
 from app.vectorstore.embeddings import get_embeddings
-from app.vectorstore.faiss_store import FaissVectorStore
+from app.vectorstore.hybrid_store import HybridVectorStore
 
 logger = get_logger(__name__)
+
+INDEX_NAME = "historical_decisions"
 
 _SYNTHETIC_CLAIMS: list[dict] = [
     {
@@ -73,29 +81,51 @@ def main() -> None:
     init_db(engine)
     session_factory = make_session_factory(engine)
 
-    embeddings = get_embeddings(settings)
-    doc_store = SqlVectorDocStore(session_factory)
-    store = FaissVectorStore.load_or_create(
-        settings.vector_index_dir, "historical_decisions", embeddings, doc_store
+    raw_embeddings = get_embeddings(settings)
+    embeddings = CachedEmbeddings(
+        inner=raw_embeddings,
+        store=SqlEmbeddingCacheStore(session_factory),
+        model_name=settings.openai_embedding_model,
     )
+    doc_store = SqlVectorDocStore(session_factory)
+    store = HybridVectorStore.load_or_create(
+        settings.vector_index_dir, INDEX_NAME, embeddings, doc_store
+    )
+
+    already_indexed_claim_ids = {
+        metadata.get("claim_id")
+        for _vector_id, _text, metadata in doc_store.get_all(INDEX_NAME)
+        if metadata.get("claim_id")
+    }
+
+    new_texts: list[str] = []
+    new_metadatas: list[dict] = []
 
     for record in _SYNTHETIC_CLAIMS:
         output_path = output_dir / f"{record['claim_id']}.json"
         output_path.write_text(json.dumps(record, indent=2), encoding="utf-8")
 
-        store.add_texts(
-            texts=[record["summary"]],
-            metadatas=[
-                {
-                    "doc_title": f"Historical decision {record['claim_id']}",
-                    "section": record["decision"],
-                }
-            ],
-        )
-        logger.info("Generated and indexed %s", record["claim_id"])
+        if record["claim_id"] in already_indexed_claim_ids:
+            logger.info(f"Skipping already-indexed {record['claim_id']}")
+            continue
 
-    store.save(settings.vector_index_dir)
-    logger.info("Saved historical_decisions index to %s", settings.vector_index_dir)
+        new_texts.append(record["summary"])
+        new_metadatas.append(
+            {
+                "doc_title": f"Historical decision {record['claim_id']}",
+                "section": record["decision"],
+                "claim_id": record["claim_id"],
+            }
+        )
+
+    if new_texts:
+        store.add_texts(new_texts, new_metadatas)
+        store.save(settings.vector_index_dir)
+
+    logger.info(
+        f"Indexed {len(new_texts)} new synthetic claims "
+        f"(skipped {len(_SYNTHETIC_CLAIMS) - len(new_texts)} already indexed)."
+    )
 
 
 if __name__ == "__main__":
