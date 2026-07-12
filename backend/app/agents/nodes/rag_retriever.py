@@ -12,11 +12,15 @@ from collections.abc import Awaitable, Callable
 from langchain_core.embeddings import Embeddings
 
 from app.core.audit import audit_update
+from app.core.exceptions import VectorStoreError
+from app.core.logging import get_logger
 from app.state.graph_state import GraphState, RetrievedChunk
 from app.vectorstore.base import VectorStore
 from app.vectorstore.faiss_store import FaissVectorStore
 
 AGENT_NAME = "rag_retriever"
+
+logger = get_logger(__name__)
 
 
 def build_rag_retriever_node(
@@ -27,17 +31,34 @@ def build_rag_retriever_node(
     similarity_threshold: float,
 ) -> Callable[[GraphState], Awaitable[dict]]:
     async def rag_retriever(state: GraphState) -> dict:
+        claim_id = state["claim_id"]
         query = state["query"]
         chunks = state.get("chunks", [])
+        logger.info(
+            f"{AGENT_NAME}.started", extra={"claim_id": claim_id, "chunk_count": len(chunks)}
+        )
 
         per_claim_store = FaissVectorStore.ephemeral("per_claim", embeddings)
         if chunks:
-            per_claim_store.add_texts(
-                texts=[chunk["text"] for chunk in chunks],
-                metadatas=[
-                    {"section": chunk["section"], "doc_type": chunk["doc_type"]} for chunk in chunks
-                ],
-            )
+            try:
+                per_claim_store.add_texts(
+                    texts=[chunk["text"] for chunk in chunks],
+                    metadatas=[
+                        {"section": chunk["section"], "doc_type": chunk["doc_type"]}
+                        for chunk in chunks
+                    ],
+                )
+            except Exception as exc:
+                logger.error(
+                    f"{AGENT_NAME}.embedding_failed",
+                    extra={"claim_id": claim_id, "source": "claim_document", "error": str(exc)},
+                    exc_info=True,
+                )
+                raise VectorStoreError(
+                    f"Failed to embed claim document chunks: {exc}",
+                    claim_id=claim_id,
+                    source="claim_document",
+                ) from exc
 
         results: list[RetrievedChunk] = []
         for store, source_label in (
@@ -45,7 +66,21 @@ def build_rag_retriever_node(
             (policy_corpus_store, "policy_corpus"),
             (historical_decisions_store, "historical_decision"),
         ):
-            for scored in store.search(query, top_k, similarity_threshold, source_label):
+            try:
+                scored_chunks = store.search(query, top_k, similarity_threshold, source_label)
+            except Exception as exc:
+                logger.error(
+                    f"{AGENT_NAME}.search_failed",
+                    extra={"claim_id": claim_id, "source": source_label, "error": str(exc)},
+                    exc_info=True,
+                )
+                raise VectorStoreError(
+                    f"Vector search against '{source_label}' failed: {exc}",
+                    claim_id=claim_id,
+                    source=source_label,
+                ) from exc
+
+            for scored in scored_chunks:
                 results.append(
                     RetrievedChunk(
                         text=scored["text"],
@@ -58,6 +93,15 @@ def build_rag_retriever_node(
                 )
 
         low_confidence_retrieval = (not results) or any(r["low_confidence"] for r in results)
+
+        logger.info(
+            f"{AGENT_NAME}.completed",
+            extra={
+                "claim_id": claim_id,
+                "result_count": len(results),
+                "low_confidence": low_confidence_retrieval,
+            },
+        )
 
         return {
             "retrieved_chunks": results,

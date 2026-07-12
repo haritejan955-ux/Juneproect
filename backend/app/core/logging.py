@@ -24,7 +24,16 @@ class SecretRedactionFilter(logging.Filter):
         return True
 
 
+_STANDARD_RECORD_ATTRS = frozenset(vars(logging.LogRecord("", 0, "", 0, "", (), None)))
+
+
 class JsonFormatter(logging.Formatter):
+    """Structured JSON logs. Any `extra={...}` kwarg passed to a logging call
+    (e.g. `logger.info("...", extra={"claim_id": claim_id, "chunk_count": 3})`)
+    is included verbatim in the emitted record — this is what every agent
+    node's logging relies on for machine-parseable, claim-correlated logs,
+    rather than free-text messages an operator has to grep and guess at."""
+
     def format(self, record: logging.LogRecord) -> str:
         payload = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -32,12 +41,12 @@ class JsonFormatter(logging.Formatter):
             "logger": record.name,
             "message": record.getMessage(),
         }
-        claim_id = getattr(record, "claim_id", None)
-        if claim_id is not None:
-            payload["claim_id"] = claim_id
+        for key, value in vars(record).items():
+            if key not in _STANDARD_RECORD_ATTRS and key not in payload:
+                payload[key] = value
         if record.exc_info:
             payload["exception"] = self.formatException(record.exc_info)
-        return json.dumps(payload)
+        return json.dumps(payload, default=str)
 
 
 def configure_logging(log_level: str = "INFO") -> None:

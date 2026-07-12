@@ -44,6 +44,16 @@ class LLMProviderError(ClaimAgentError):
     status_code = 503
 
 
+class GraphStateError(ClaimAgentError):
+    """A node read GraphState and found a required field missing or
+    malformed — an invariant violation between nodes (e.g. Final Output
+    running without an upstream node having set `decision`), not a bad
+    request. Distinct from InvalidUploadError, which is a bad *input*."""
+
+    error_code = "graph_state_error"
+    status_code = 500
+
+
 def register_exception_handlers(app: FastAPI) -> None:
     @app.exception_handler(ClaimAgentError)
     async def handle_claim_agent_error(request: Request, exc: ClaimAgentError) -> JSONResponse:

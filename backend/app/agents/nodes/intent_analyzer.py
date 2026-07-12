@@ -13,10 +13,14 @@ from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 
 from app.core.audit import audit_update
+from app.core.llm_call import invoke_structured
+from app.core.logging import get_logger
 from app.prompts.intent_analyzer_prompt import build_intent_analyzer_prompt
 from app.state.graph_state import GraphState, Intent
 
 AGENT_NAME = "intent_analyzer"
+
+logger = get_logger(__name__)
 
 
 class IntentClassification(BaseModel):
@@ -34,9 +38,17 @@ def build_intent_analyzer_node(
     classifier = chat_model.with_structured_output(IntentClassification)
 
     async def intent_analyzer(state: GraphState) -> dict:
+        claim_id = state["claim_id"]
+        logger.info(f"{AGENT_NAME}.started", extra={"claim_id": claim_id})
+
         prompt = build_intent_analyzer_prompt(state["query"], state.get("document_metadata", {}))
-        result = await classifier.ainvoke(prompt)
-        assert isinstance(result, IntentClassification)
+        result = await invoke_structured(
+            classifier,
+            prompt,
+            agent_name=AGENT_NAME,
+            claim_id=claim_id,
+            expected_type=IntentClassification,
+        )
 
         entities = {
             key: value
@@ -48,6 +60,11 @@ def build_intent_analyzer_node(
             }.items()
             if value
         }
+
+        logger.info(
+            f"{AGENT_NAME}.completed",
+            extra={"claim_id": claim_id, "intent": result.intent, "confidence": result.confidence},
+        )
 
         return {
             "intent": result.intent,

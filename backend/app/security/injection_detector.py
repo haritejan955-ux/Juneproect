@@ -12,7 +12,10 @@ from typing import TypedDict
 from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel, Field
 
+from app.core.logging import get_logger
 from app.prompts.security_checker_prompt import build_security_checker_prompt
+
+logger = get_logger(__name__)
 
 
 class SecurityFlags(TypedDict):
@@ -65,8 +68,41 @@ class InjectionDetector:
     async def detect(self, text: str) -> SecurityFlags:
         heuristic_matches = heuristic_scan(text)
 
-        classification = await self._classifier.ainvoke(build_security_checker_prompt(text))
-        assert isinstance(classification, InjectionClassification)
+        try:
+            classification = await self._classifier.ainvoke(build_security_checker_prompt(text))
+        except Exception as exc:
+            # Fail CLOSED, not open: if the LLM classifier layer can't run, we cannot confirm
+            # this claim is safe. A transient provider outage blocking claims is an acceptable
+            # cost; a broken classifier silently downgrading to heuristic-only detection and
+            # letting an injection through is not. See docs/security-architecture.md section 3.
+            logger.error(
+                "injection_detector.classifier_failed",
+                extra={"error": str(exc), "heuristic_matches": heuristic_matches},
+                exc_info=True,
+            )
+            return SecurityFlags(
+                injection_detected=True,
+                heuristic_matched_patterns=heuristic_matches,
+                llm_confidence=1.0,
+                llm_reasoning=(
+                    f"LLM classifier layer failed ({exc}); failing closed and blocking as a "
+                    "precaution rather than proceeding on heuristic-only detection."
+                ),
+            )
+
+        if not isinstance(classification, InjectionClassification):
+            logger.error(
+                "injection_detector.unexpected_response_type",
+                extra={"actual_type": type(classification).__name__},
+            )
+            return SecurityFlags(
+                injection_detected=True,
+                heuristic_matched_patterns=heuristic_matches,
+                llm_confidence=1.0,
+                llm_reasoning=(
+                    "LLM classifier returned an unexpected response type; failing closed."
+                ),
+            )
 
         llm_flagged = (
             classification.is_injection and classification.confidence >= self._block_confidence
