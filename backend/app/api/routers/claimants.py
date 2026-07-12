@@ -1,10 +1,13 @@
 from fastapi import APIRouter, Depends
 
+from app.api.auth import require_api_key
 from app.api.dependencies import get_claim_repository
 from app.memory.repository import ClaimRepository
 from app.schemas.claimant import ClaimantHistoryResponse, ClaimHistoryEntry
 
-router = APIRouter(prefix="/api/v1/claimants", tags=["claimants"])
+router = APIRouter(
+    prefix="/api/v1/claimants", tags=["claimants"], dependencies=[Depends(require_api_key)]
+)
 
 
 @router.get("/{claimant_id}/history", response_model=ClaimantHistoryResponse)

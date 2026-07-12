@@ -1,11 +1,14 @@
 from fastapi import APIRouter, BackgroundTasks, Depends, File, Form, UploadFile
 
+from app.api.auth import require_api_key
 from app.api.dependencies import get_claim_repository, get_claim_service
 from app.memory.repository import ClaimRepository
 from app.schemas.claim import ClaimStatusResponse, ClaimSubmitResponse
 from app.services.claim_service import ClaimService
 
-router = APIRouter(prefix="/api/v1/claims", tags=["claims"])
+router = APIRouter(
+    prefix="/api/v1/claims", tags=["claims"], dependencies=[Depends(require_api_key)]
+)
 
 
 @router.post("", response_model=ClaimSubmitResponse, status_code=202)

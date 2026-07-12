@@ -106,6 +106,12 @@ class HybridVectorStore:
         justifies hybrid retrieval being the default."""
         return self._dense.search(query, k, threshold, source_label)
 
+    def document_count(self) -> int:
+        """Dense-index count — used by the `/health/ready` readiness check to confirm an
+        index actually loaded, not to reflect BM25 state (the two always hold the same
+        documents by construction, see `add_texts`/`load_or_create`)."""
+        return self._dense.document_count()
+
     def save(self, directory: str) -> None:
         # BM25 is deliberately not persisted — see the class docstring and BM25Index's.
         self._dense.save(directory)

@@ -12,6 +12,11 @@ import os
 
 import pytest
 
+TEST_API_KEY = "test-api-key-do-not-use-in-production"
+"""Fixed, obviously-fake key for tests that exercise the authenticated HTTP surface —
+see `tests/integration/test_auth.py`. Never used as a default anywhere in application
+code (see the fail-closed design note on `Settings.api_keys`); it only exists here."""
+
 
 @pytest.fixture(scope="session", autouse=True)
 def _test_environment(tmp_path_factory: pytest.TempPathFactory) -> None:
@@ -23,6 +28,7 @@ def _test_environment(tmp_path_factory: pytest.TempPathFactory) -> None:
     os.environ["POLICY_CORPUS_DIR"] = str(data_dir / "policy_corpus")
     os.environ["SYNTHETIC_CLAIMS_DIR"] = str(data_dir / "synthetic_claims")
     os.environ["UPLOAD_STORAGE_DIR"] = str(data_dir / "uploads")
+    os.environ["API_KEYS"] = f'["{TEST_API_KEY}"]'
     (data_dir / "policy_corpus").mkdir(parents=True, exist_ok=True)
 
     from app.config.settings import get_settings

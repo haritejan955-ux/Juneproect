@@ -9,6 +9,7 @@ from fastapi.testclient import TestClient
 from app.api.dependencies import get_claim_service
 from app.main import create_app
 from app.state.graph_state import RawDocument
+from tests.conftest import TEST_API_KEY
 
 
 class _FakeClaimService:
@@ -33,6 +34,7 @@ def test_submit_claim_returns_202_with_claim_id():
     with TestClient(app) as client:
         response = client.post(
             "/api/v1/claims",
+            headers={"X-API-Key": TEST_API_KEY},
             data={"claimant_id": "claimant-1", "query": "Is my MRI covered?"},
             files={"files": ("claim.pdf", b"%PDF-1.4 fake content", "application/pdf")},
         )

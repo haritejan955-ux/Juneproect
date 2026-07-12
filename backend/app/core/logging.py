@@ -2,12 +2,20 @@ import json
 import logging
 import re
 import sys
+from contextvars import ContextVar
 from datetime import UTC, datetime
 
 _SECRET_PATTERNS = [
     re.compile(r"sk-[A-Za-z0-9_-]{10,}"),
     re.compile(r"sk-ant-[A-Za-z0-9_-]{10,}"),
 ]
+
+request_id_var: ContextVar[str | None] = ContextVar("request_id", default=None)
+"""Set by `app.core.middleware.RequestContextMiddleware` for the duration of one HTTP
+request. Reading it here (rather than threading a `request_id` parameter through every
+service/node/repository call) is what lets every log line emitted anywhere during that
+request — including deep inside the LangGraph pipeline — carry the same correlation id
+with zero call-site changes."""
 
 
 class SecretRedactionFilter(logging.Filter):
@@ -21,6 +29,18 @@ class SecretRedactionFilter(logging.Filter):
         if redacted != message:
             record.msg = redacted
             record.args = ()
+        return True
+
+
+class RequestIdFilter(logging.Filter):
+    """Stamps the active request's correlation id onto every record, unless the call site
+    already passed one explicitly via `extra={"request_id": ...}`."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if not hasattr(record, "request_id"):
+            request_id = request_id_var.get()
+            if request_id is not None:
+                record.request_id = request_id
         return True
 
 
@@ -56,6 +76,7 @@ def configure_logging(log_level: str = "INFO") -> None:
     handler = logging.StreamHandler(stream=sys.stdout)
     handler.setFormatter(JsonFormatter())
     handler.addFilter(SecretRedactionFilter())
+    handler.addFilter(RequestIdFilter())
 
     root_logger.handlers.clear()
     root_logger.addHandler(handler)

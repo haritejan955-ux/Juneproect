@@ -19,6 +19,13 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     cors_origins: list[str] = ["http://localhost:3000"]
 
+    # --- Authentication ---
+    # Fail-closed by design: an empty list means every request is rejected, never that auth is
+    # skipped. There is deliberately no baked-in default key (a default credential is itself a
+    # vulnerability) — every deployment, including local dev, must set this explicitly. See
+    # docs/security-architecture.md section "API authentication".
+    api_keys: list[str] = []
+
     # --- LLM provider ---
     llm_provider: Literal["openai", "anthropic"] = "openai"
     openai_api_key: str | None = None

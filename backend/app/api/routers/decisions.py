@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
 
+from app.api.auth import require_api_key
 from app.api.dependencies import get_claim_repository
 from app.core.exceptions import ClaimNotFoundError
 from app.memory.repository import ClaimRepository
@@ -10,7 +11,9 @@ from app.schemas.decision import (
     FraudSignalResponse,
 )
 
-router = APIRouter(prefix="/api/v1/claims", tags=["decisions"])
+router = APIRouter(
+    prefix="/api/v1/claims", tags=["decisions"], dependencies=[Depends(require_api_key)]
+)
 
 
 @router.get("/{claim_id}/decision", response_model=DecisionResponse)

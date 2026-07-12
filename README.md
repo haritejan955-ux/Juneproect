@@ -10,7 +10,7 @@ with an embedding cache and incremental indexing, and a self-critique retry loop
 
 This repository currently contains the **complete project skeleton**: every module, agent node,
 API route, database model, and frontend screen is wired end-to-end with real (not stubbed)
-control flow, and the full backend test suite (106 tests, including a full-app lifespan
+control flow, and the full backend test suite (122 tests, including a full-app lifespan
 integration test) passes. The RAG layer is production-shaped: hybrid dense+sparse retrieval with
 Reciprocal Rank Fusion, a populated 6-document policy corpus, a persistent embedding cache,
 genuinely incremental ingestion (verified: a re-run over an unchanged corpus makes zero new
@@ -21,6 +21,16 @@ The Security Checker's PDF injection test is also done: `test_scenarios/05_promp
 has real, generated PDF fixtures and an automated proof
 (`backend/tests/security/test_malicious_pdf_injection.py`) that runs them through the actual
 production graph end-to-end, not just a raw-string unit test.
+
+The API surface is production-shaped: every `/api/v1/*` route requires an `X-API-Key`
+(fail-closed — an unset `API_KEYS` rejects everyone, never lets everyone through), a raw ASGI
+middleware assigns a request-correlation id that's automatically stamped onto every log line
+emitted anywhere during that request, unhandled exceptions are caught and logged without ever
+leaking a stack trace to the client, `/health` and `/health/ready` give an orchestrator real
+liveness/readiness signals (DB + both vector indices), and the dispute chat has a token-streaming
+SSE variant alongside the blocking JSON one. See
+[docs/api-architecture.md](docs/api-architecture.md) and
+[docs/security-architecture.md](docs/security-architecture.md) section 9.
 
 What's intentionally *not* yet filled in:
 
@@ -73,6 +83,15 @@ cp .env.example backend/.env      # fill in OPENAI_API_KEY (and ANTHROPIC_API_KE
 cp frontend/.env.example frontend/.env.local
 ```
 
+Generate a real API key and set it in **both** files — auth is fail-closed, so the backend
+rejects every `/api/v1/*` request until this is set:
+
+```bash
+python -c "import secrets; print(secrets.token_urlsafe(32))"
+# → put the result in backend/.env's API_KEYS=["..."] and
+#   frontend/.env.local's NEXT_PUBLIC_API_KEY=...
+```
+
 ### 2. Backend
 
 ```bash
@@ -99,7 +118,7 @@ make frontend-dev       # http://localhost:3000
 ### 4. Run the tests
 
 ```bash
-make backend-test       # 106 tests: unit, integration (real app lifespan), security
+make backend-test       # 122 tests: unit, integration (real app lifespan), security
 make frontend-typecheck
 make frontend-build
 ```
@@ -161,7 +180,7 @@ Non-negotiable criteria from the spec, and where each is implemented:
 - [x] GitHub repo with README and setup instructions
 - [x] LangGraph agent code — each node in its own file with its own system prompt
 - [x] RAG ingestion script + vector store setup using public corpus — `backend/scripts/build_policy_index.py` (incremental, multi-format), 6-document representative corpus in `backend/data/policy_corpus/`
-- [x] FastAPI backend + WebSocket streaming endpoint
+- [x] FastAPI backend + WebSocket streaming endpoint — plus API-key auth, request-id/access-log middleware, structured JSON logging, `RequestValidationError`/catch-all exception handlers, liveness+readiness health checks, and an SSE token-streaming variant of the dispute endpoint; see [docs/api-architecture.md](docs/api-architecture.md)
 - [x] React frontend with all 5 screens
 - [ ] 5 test claim scenarios (fraud, partial approval, denial, etc.) — `test_scenarios/05_prompt_injection_attack/` done; the other 4 are scaffolded, content pending
 - [x] Security test: documented proof PDF injection is caught — real generated PDF fixtures in `test_scenarios/05_prompt_injection_attack/`, run end-to-end through the production graph in `backend/tests/security/test_malicious_pdf_injection.py`

@@ -2,11 +2,14 @@ import json
 
 from fastapi import APIRouter, Depends
 
+from app.api.auth import require_api_key
 from app.api.dependencies import get_claim_repository
 from app.memory.repository import ClaimRepository
 from app.schemas.audit import AuditLogEntryResponse, AuditTrailResponse
 
-router = APIRouter(prefix="/api/v1/claims", tags=["audit"])
+router = APIRouter(
+    prefix="/api/v1/claims", tags=["audit"], dependencies=[Depends(require_api_key)]
+)
 
 
 @router.get("/{claim_id}/audit", response_model=AuditTrailResponse)

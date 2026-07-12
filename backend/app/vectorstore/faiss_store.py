@@ -121,6 +121,9 @@ class FaissVectorStore:
             )
         return results
 
+    def document_count(self) -> int:
+        return self._index.ntotal
+
     def save(self, directory: str) -> None:
         os.makedirs(directory, exist_ok=True)
         faiss.write_index(self._index, os.path.join(directory, f"{self.index_name}.faiss"))

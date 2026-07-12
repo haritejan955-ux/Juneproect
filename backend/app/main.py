@@ -18,6 +18,7 @@ from app.api.routers import audit, claimants, claims, decisions, disputes, healt
 from app.config.settings import get_settings
 from app.core.exceptions import register_exception_handlers
 from app.core.logging import configure_logging, get_logger
+from app.core.middleware import RequestContextMiddleware
 from app.llm.provider import get_chat_model
 from app.memory.checkpointer import build_checkpointer
 from app.memory.database import create_db_engine, init_db, make_session_factory
@@ -78,6 +79,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     app.state.settings = settings
     app.state.session_factory = session_factory
     app.state.stream_publisher = stream_publisher
+    app.state.policy_corpus_store = policy_corpus_store
+    app.state.historical_decisions_store = historical_decisions_store
     app.state.claim_service = ClaimService(
         graph=graph,
         session_factory=session_factory,
@@ -98,11 +101,38 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     logger.info("Shutting down")
 
 
+_TAGS_METADATA = [
+    {
+        "name": "health",
+        "description": "Liveness and readiness probes. Unauthenticated — see "
+        "app/api/routers/health.py.",
+    },
+    {"name": "claims", "description": "Submit a claim and poll its processing status."},
+    {"name": "decisions", "description": "Read a claim's finalized decision."},
+    {
+        "name": "disputes",
+        "description": "Multi-turn conversation contesting a finalized decision, including an "
+        "SSE token-streaming variant.",
+    },
+    {"name": "audit", "description": "Full timestamped agent execution log for a claim."},
+    {"name": "claimants", "description": "A claimant's prior claim history."},
+]
+
+
 def create_app() -> FastAPI:
     settings = get_settings()
     app = FastAPI(
         title="US Insurance Claim Processing Agent",
+        description=(
+            "A multi-agent LangGraph pipeline that processes US insurance claims: parses "
+            "uploaded documents, validates coverage against a policy corpus via hybrid RAG, "
+            "screens for fraud and prompt injection, and produces a cited claim decision. "
+            "All `/api/v1/*` routes require an `X-API-Key` header — see the security scheme "
+            "below."
+        ),
         version="0.1.0",
+        license_info={"name": "MIT"},
+        openapi_tags=_TAGS_METADATA,
         lifespan=lifespan,
     )
 
@@ -113,6 +143,10 @@ def create_app() -> FastAPI:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+    # Added after CORSMiddleware so it ends up outermost (Starlette wraps middleware in
+    # reverse registration order) — request_id and access-log timing then cover the whole
+    # request/response cycle, CORS handling included, not just the routed handler.
+    app.add_middleware(RequestContextMiddleware)
 
     register_exception_handlers(app)
 
