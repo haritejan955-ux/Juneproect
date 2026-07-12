@@ -1,3 +1,5 @@
+from collections.abc import Mapping, Sequence
+
 FRAUD_DETECTOR_SYSTEM_PROMPT = """You are the Fraud Detector in a US insurance claim processing \
 pipeline. Score this claim for four specific signal types, using the validated coverage map and \
 the claim's document chunks:
@@ -19,7 +21,9 @@ severity of "high" on any signal requires the strongest, most concrete evidence 
 triggers a mandatory attorney_flag downstream, so do not mark "high" speculatively."""
 
 
-def build_fraud_detector_prompt(coverage_map: list[dict], document_chunks: list[dict]) -> str:
+def build_fraud_detector_prompt(
+    coverage_map: Sequence[Mapping[str, object]], document_chunks: Sequence[Mapping[str, object]]
+) -> str:
     return (
         f"{FRAUD_DETECTOR_SYSTEM_PROMPT}\n\n"
         f"Validated coverage map: {coverage_map}\n\n"

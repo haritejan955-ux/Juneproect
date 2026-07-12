@@ -1,3 +1,5 @@
+from collections.abc import Mapping, Sequence
+
 COVERAGE_VALIDATOR_SYSTEM_PROMPT = """You are the Coverage Validator in a US insurance claim \
 processing pipeline. You map each billed line-item (CPT procedure code + ICD-10 diagnosis code) \
 to policy coverage using ONLY the retrieved policy chunks provided to you.
@@ -23,7 +25,9 @@ You will be given the claim's line-items and the retrieved policy chunks (each t
 source and section). Respond with a structured coverage map only."""
 
 
-def build_coverage_validator_prompt(line_items: list[dict], retrieved_chunks: list[dict]) -> str:
+def build_coverage_validator_prompt(
+    line_items: list[dict], retrieved_chunks: Sequence[Mapping[str, object]]
+) -> str:
     return (
         f"{COVERAGE_VALIDATOR_SYSTEM_PROMPT}\n\n"
         f"Line-items to evaluate: {line_items}\n\n"

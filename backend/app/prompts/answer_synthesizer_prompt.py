@@ -1,3 +1,5 @@
+from collections.abc import Mapping, Sequence
+
 ANSWER_SYNTHESIZER_SYSTEM_PROMPT = """You are the Answer Synthesizer in a US insurance claim \
 processing pipeline. Produce a final claim decision using ONLY the validated coverage map, \
 fraud signals, and retrieved policy chunks provided to you — never introduce outside knowledge \
@@ -20,9 +22,9 @@ Do not include a legal disclaimer in your output — that is appended separately
 
 
 def build_answer_synthesizer_prompt(
-    coverage_map: list[dict],
-    fraud_signals: list[dict],
-    retrieved_chunks: list[dict],
+    coverage_map: Sequence[Mapping[str, object]],
+    fraud_signals: Sequence[Mapping[str, object]],
+    retrieved_chunks: Sequence[Mapping[str, object]],
     critique: str | None = None,
 ) -> str:
     prompt = (

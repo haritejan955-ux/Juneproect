@@ -1,3 +1,5 @@
+from collections.abc import Mapping, Sequence
+
 SELF_CRITIC_SYSTEM_PROMPT = """You are the Self-Critic in a US insurance claim processing \
 pipeline. Your job is to find reasons the draft decision below is WRONG, not to rubber-stamp \
 it — you are a separate, adversarial reviewer, not the author.
@@ -21,7 +23,7 @@ citation gap, or unsupported claim."""
 
 
 def build_self_critic_prompt(
-    draft_decision: str, justification: str, retrieved_chunks: list[dict]
+    draft_decision: str, justification: str, retrieved_chunks: Sequence[Mapping[str, object]]
 ) -> str:
     return (
         f"{SELF_CRITIC_SYSTEM_PROMPT}\n\n"

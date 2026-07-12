@@ -130,12 +130,15 @@ make frontend-install
 make frontend-dev       # http://localhost:3000
 ```
 
-### 4. Run the tests
+### 4. Run the tests and static analysis
 
 ```bash
 make backend-test       # 136 tests: unit, LangGraph full-pipeline, integration, security
+make backend-lint       # ruff
+make backend-typecheck  # mypy
 make frontend-test      # 30 tests: Vitest + Testing Library
-make frontend-typecheck
+make frontend-typecheck # tsc --noEmit
+make frontend-lint      # eslint
 make frontend-build
 ```
 

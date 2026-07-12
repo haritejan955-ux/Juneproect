@@ -10,6 +10,7 @@ node works in isolation.
 
 from pathlib import Path
 
+from langchain_core.language_models import BaseChatModel
 from langgraph.graph.state import CompiledStateGraph
 
 from app.agents.graph import build_claim_graph
@@ -22,7 +23,7 @@ from app.memory.checkpointer import build_checkpointer, thread_config
 from app.security.injection_detector import InjectionClassification
 from app.state.graph_state import GraphState, RawDocument
 from app.vectorstore.hybrid_store import HybridVectorStore
-from tests.fakes import FakeEmbeddings, MultiSchemaFakeChatModel
+from tests.fakes import FakeEmbeddings
 
 SCENARIOS_DIR = Path(__file__).resolve().parents[3] / "test_scenarios"
 
@@ -52,7 +53,11 @@ def initial_state(claim_id: str, pdf_path: Path, query: str) -> GraphState:
     }
 
 
-def build_test_graph(chat_model: MultiSchemaFakeChatModel) -> CompiledStateGraph:
+def build_test_graph(chat_model: BaseChatModel) -> CompiledStateGraph:
+    """`chat_model` is typed as the real `BaseChatModel` interface, not the concrete
+    `MultiSchemaFakeChatModel` test double that's actually passed in — these fakes are
+    deliberately duck-typed (see `tests/fakes.py`'s module docstring) rather than real
+    LangChain subclasses, so they satisfy this by structure, not by inheritance."""
     embeddings = FakeEmbeddings()
     return build_claim_graph(
         chat_model=chat_model,

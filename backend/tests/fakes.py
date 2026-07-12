@@ -8,6 +8,8 @@ call count) rather than an unconfigured mock silently returning a
 
 from collections.abc import Sequence
 
+from langchain_core.embeddings import Embeddings
+
 
 class FakeStructuredRunnable:
     """Stands in for `chat_model.with_structured_output(Schema)`'s return
@@ -97,11 +99,16 @@ class MultiSchemaFakeChatModel:
         return runnable
 
 
-class FakeEmbeddings:
+class FakeEmbeddings(Embeddings):
     """Deterministic, dependency-free stand-in for `langchain_core.embeddings.Embeddings`.
     Returns a fixed-dimension vector derived from a hash of the input text — these tests
     exercise wiring and error handling, not retrieval quality, so vectors don't need to encode
-    real semantic similarity."""
+    real semantic similarity.
+
+    Unlike the chat-model fakes above, this one genuinely subclasses the real ABC rather than
+    just duck-typing it: `Embeddings` has no pydantic machinery to fight, just two abstract
+    methods this class already implements, so real inheritance is free and lets it satisfy
+    `Embeddings`-typed parameters (e.g. `build_claim_graph`) without a cast or ignore."""
 
     def __init__(self, dimension: int = 1536, raise_on_call: BaseException | None = None) -> None:
         self._dimension = dimension

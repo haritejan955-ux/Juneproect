@@ -7,6 +7,7 @@ model without touching node code.
 """
 
 from langchain_core.language_models import BaseChatModel
+from pydantic import SecretStr
 
 from app.config.settings import Settings
 from app.core.exceptions import LLMProviderError
@@ -25,7 +26,7 @@ def get_chat_model(settings: Settings) -> BaseChatModel:
 
         return ChatOpenAI(
             model=settings.openai_chat_model,
-            api_key=api_key,
+            api_key=SecretStr(api_key),
             temperature=settings.llm_temperature,
         )
 
@@ -34,7 +35,7 @@ def get_chat_model(settings: Settings) -> BaseChatModel:
 
         return ChatAnthropic(
             model_name=settings.anthropic_chat_model,
-            api_key=api_key,
+            api_key=SecretStr(api_key),
             temperature=settings.llm_temperature,
             timeout=60,
             stop=None,

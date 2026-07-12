@@ -5,6 +5,7 @@ decoupled from chat-model choice (see docs/design-decisions.md, decision #2).
 """
 
 from langchain_core.embeddings import Embeddings
+from pydantic import SecretStr
 
 from app.config.settings import Settings
 from app.core.exceptions import LLMProviderError
@@ -20,5 +21,5 @@ def get_embeddings(settings: Settings) -> Embeddings:
 
     return OpenAIEmbeddings(
         model=settings.openai_embedding_model,
-        api_key=settings.openai_api_key,
+        api_key=SecretStr(settings.openai_api_key),
     )

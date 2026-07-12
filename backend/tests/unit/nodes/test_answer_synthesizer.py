@@ -20,7 +20,10 @@ def _state(**overrides) -> GraphState:
         "retrieved_chunks": [],
         "retry_count": 0,
     }
-    base.update(overrides)
+    # TypedDict.update() requires its argument to be statically provable as shape-compatible;
+    # `overrides` is deliberately a free-form **kwargs bag of whichever GraphState fields a
+    # given test wants to set, which mypy can't verify field-by-field here.
+    base.update(overrides)  # type: ignore[typeddict-item]
     return base
 
 

@@ -65,7 +65,11 @@ class FaissVectorStore:
         self._embeddings = embeddings
         self._doc_store = doc_store
         self._dimension = dimension
-        self._index = faiss.IndexIDMap2(faiss.IndexFlatIP(dimension))
+        # Typed as the base `faiss.Index`, not `IndexIDMap2`: `faiss.read_index()` (used by
+        # `load_or_create` below) only promises the base type back, even though at runtime it's
+        # always an IndexIDMap2 for a file this class wrote. Every method actually called on
+        # this attribute (`add_with_ids`, `search`, `ntotal`) is declared on `Index` itself.
+        self._index: faiss.Index = faiss.IndexIDMap2(faiss.IndexFlatIP(dimension))
 
     def add_texts(self, texts: list[str], metadatas: list[dict]) -> list[int]:
         if not texts:
