@@ -1,6 +1,6 @@
 .PHONY: help backend-install backend-dev backend-test backend-lint \
 	init-db build-index seed-claims \
-	frontend-install frontend-dev frontend-build frontend-typecheck frontend-lint \
+	frontend-install frontend-dev frontend-build frontend-typecheck frontend-lint frontend-test \
 	docker-up docker-down
 
 help:
@@ -19,6 +19,7 @@ help:
 	@echo "  make frontend-build      Production build the frontend"
 	@echo "  make frontend-typecheck  Run tsc --noEmit"
 	@echo "  make frontend-lint       Run eslint"
+	@echo "  make frontend-test       Run the Vitest test suite"
 	@echo ""
 	@echo "Docker:"
 	@echo "  make docker-up           Build and start both services via docker compose"
@@ -59,6 +60,9 @@ frontend-typecheck:
 
 frontend-lint:
 	cd frontend && npm run lint
+
+frontend-test:
+	cd frontend && npm test
 
 docker-up:
 	docker compose up --build

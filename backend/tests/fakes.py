@@ -11,19 +11,35 @@ from collections.abc import Sequence
 
 class FakeStructuredRunnable:
     """Stands in for `chat_model.with_structured_output(Schema)`'s return
-    value. Configured with either a canned result to return from `ainvoke`,
-    or an exception instance to raise — covers both the happy path and the
-    error-handling path every node's unit tests need."""
+    value. Configured with either a single canned result/exception to return
+    from every `ainvoke` call, or a `list` of them to return one-per-call in
+    order (repeating the last entry once exhausted) — the latter is what
+    lets a test script a node's *successive* calls differently, e.g. Answer
+    Synthesizer returning a low-quality draft on the first pass and a good
+    one after Self-Critic sends it back for retry. A schema is only ever
+    bound to one runnable at graph-construction time (see
+    `MultiSchemaFakeChatModel`'s docstring), so per-call sequencing has to
+    live here, not in how many runnables get created."""
 
     def __init__(self, result_or_exception: object) -> None:
-        self._result_or_exception = result_or_exception
+        self._sequence: list[object] | None = (
+            list(result_or_exception) if isinstance(result_or_exception, list) else None
+        )
+        self._single = result_or_exception if self._sequence is None else None
+        self._call_count = 0
         self.prompts_received: list[str] = []
 
     async def ainvoke(self, prompt: str) -> object:
         self.prompts_received.append(prompt)
-        if isinstance(self._result_or_exception, BaseException):
-            raise self._result_or_exception
-        return self._result_or_exception
+        if self._sequence is not None:
+            index = min(self._call_count, len(self._sequence) - 1)
+            value = self._sequence[index]
+        else:
+            value = self._single
+        self._call_count += 1
+        if isinstance(value, BaseException):
+            raise value
+        return value
 
 
 class FakeChatModel:
@@ -56,7 +72,15 @@ class MultiSchemaFakeChatModel:
     full-graph run, where Intent Analyzer and Security Checker's classifier each call
     `with_structured_output` with a different schema). Raises `AssertionError` for an
     unconfigured schema rather than returning `None` — a test relying on this fake should know
-    immediately if it exercised a node it didn't mean to."""
+    immediately if it exercised a node it didn't mean to.
+
+    A schema's configured value may be a `list` instead of a single result/exception, in which
+    case `FakeStructuredRunnable` serves it one-per-call in order — e.g.
+    `{_CritiqueResult: [_CritiqueResult(...low score...), _CritiqueResult(...high score...)]}`
+    to script a retry: Self-Critic fails the first pass, Answer Synthesizer runs again on the
+    `prepare_retry` edge, and Self-Critic passes the second time, exercising the real
+    conditional retry edge end-to-end rather than asserting on `route_after_critic` in
+    isolation."""
 
     def __init__(self, by_schema: dict[type, object]) -> None:
         self._by_schema = by_schema

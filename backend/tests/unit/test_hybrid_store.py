@@ -89,3 +89,18 @@ def test_load_or_create_with_no_persisted_index_starts_empty(tmp_path: Path):
     )
 
     assert store.search("anything", k=5, threshold=0.0, source_label="policy_corpus") == []
+
+
+def test_document_count_reflects_the_dense_index_not_bm25():
+    """`/health/ready` (app/api/routers/health.py) reports this count as its readiness signal
+    for each index — it must reflect documents actually added, not stay pinned at zero."""
+    embeddings = FakeEmbeddings()
+    store = HybridVectorStore.ephemeral("policy_corpus", embeddings)
+    assert store.document_count() == 0
+
+    store.add_texts(
+        texts=["first policy excerpt", "second policy excerpt"],
+        metadatas=[{"doc_title": "a"}, {"doc_title": "b"}],
+    )
+
+    assert store.document_count() == 2
