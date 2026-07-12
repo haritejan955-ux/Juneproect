@@ -1,6 +1,12 @@
 import type { Metadata } from "next";
+import { Inter } from "next/font/google";
+
+import { SiteHeader } from "@/components/layout/site-header";
+import { Providers } from "./providers";
 
 import "./globals.css";
+
+const inter = Inter({ subsets: ["latin"], variable: "--font-sans" });
 
 export const metadata: Metadata = {
   title: "US Insurance Claim Processing Agent",
@@ -9,16 +15,13 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="en">
-      <body className="min-h-screen bg-slate-50 text-slate-900 antialiased">
-        <div className="mx-auto max-w-5xl px-4 py-8">
-          <header className="mb-8">
-            <h1 className="text-xl font-semibold text-slate-900">
-              US Insurance Claim Processing Agent
-            </h1>
-          </header>
-          <main>{children}</main>
-        </div>
+    <html lang="en" suppressHydrationWarning>
+      <body className={`${inter.variable} min-h-screen bg-background font-sans antialiased`}>
+        <Providers>
+          <div className="pointer-events-none fixed inset-0 -z-10 bg-[radial-gradient(circle_at_20%_-10%,hsl(var(--primary)/0.12),transparent_45%),radial-gradient(circle_at_85%_10%,hsl(var(--primary)/0.08),transparent_40%)]" />
+          <SiteHeader />
+          <main className="container py-8 sm:py-10">{children}</main>
+        </Providers>
       </body>
     </html>
   );
