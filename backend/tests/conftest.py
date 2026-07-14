@@ -1,36 +1,56 @@
-"""Test-wide fixtures.
-
-Sets a dummy OpenAI key and redirects all storage paths into a temp
-directory before any test imports `app.config.settings` — constructing
-`ChatOpenAI`/`OpenAIEmbeddings` with a dummy key succeeds without a network
-call (the key is only used when a request is actually made), so this lets
-the full app (including its lifespan) start up in CI with no real
-credentials and no external calls.
-"""
-
 import os
+import tempfile
+from pathlib import Path
 
-import pytest
+_TEST_DB_DIR = Path(tempfile.mkdtemp())
+os.environ.setdefault("DATABASE_URL", f"sqlite+aiosqlite:///{_TEST_DB_DIR / 'test.db'}")
+os.environ.setdefault("API_KEYS", '["test-key"]')
+os.environ.setdefault("OPENAI_API_KEY", "sk-test-not-real")
 
-TEST_API_KEY = "test-api-key-do-not-use-in-production"
-"""Fixed, obviously-fake key for tests that exercise the authenticated HTTP surface —
-see `tests/integration/test_auth.py`. Never used as a default anywhere in application
-code (see the fail-closed design note on `Settings.api_keys`); it only exists here."""
+import pytest  # noqa: E402
+
+from app.core.config import get_settings  # noqa: E402
+from app.rag.store import InteractionRetriever  # noqa: E402
+from tests.fakes import FakeChatModel, FakeEmbeddings  # noqa: E402
+
+TEST_API_KEY = "test-key"
 
 
-@pytest.fixture(scope="session", autouse=True)
-def _test_environment(tmp_path_factory: pytest.TempPathFactory) -> None:
-    data_dir = tmp_path_factory.mktemp("claim_agent_test_data")
-    os.environ["OPENAI_API_KEY"] = "sk-test-dummy-key-for-tests"
-    os.environ["LLM_PROVIDER"] = "openai"
-    os.environ["DATABASE_URL"] = f"sqlite:///{data_dir / 'test.db'}"
-    os.environ["VECTOR_INDEX_DIR"] = str(data_dir / "indices")
-    os.environ["POLICY_CORPUS_DIR"] = str(data_dir / "policy_corpus")
-    os.environ["SYNTHETIC_CLAIMS_DIR"] = str(data_dir / "synthetic_claims")
-    os.environ["UPLOAD_STORAGE_DIR"] = str(data_dir / "uploads")
-    os.environ["API_KEYS"] = f'["{TEST_API_KEY}"]'
-    (data_dir / "policy_corpus").mkdir(parents=True, exist_ok=True)
+@pytest.fixture(autouse=True)
+async def _ensure_tables_exist() -> None:
+    """httpx's ASGITransport doesn't fire FastAPI's lifespan startup, so tables
+    wouldn't otherwise get created before an integration test hits the DB."""
+    from app.db.session import init_db
 
-    from app.config.settings import get_settings
+    await init_db()
 
-    get_settings.cache_clear()
+
+@pytest.fixture
+def fake_llm() -> FakeChatModel:
+    return FakeChatModel()
+
+
+@pytest.fixture
+def interaction_retriever(tmp_path: Path) -> InteractionRetriever:
+    settings = get_settings()
+    return InteractionRetriever.build(settings.interaction_corpus_dir, tmp_path / "index", FakeEmbeddings())
+
+
+@pytest.fixture
+def graph_fakes(monkeypatch: pytest.MonkeyPatch, fake_llm: FakeChatModel, interaction_retriever: InteractionRetriever):
+    """Patches every LLM/RAG call site the graph's nodes use so a full pipeline run
+    hits zero network calls. Returns the fake chat model so tests can `.queue(...)`
+    the structured responses they need, in call order."""
+    import app.agents.nodes.prescription_parser as parser_node
+    import app.agents.nodes.risk_synthesizer as synthesizer_node
+    import app.agents.nodes.self_critic as critic_node
+    import app.agents.nodes.interaction_retriever as retriever_node
+    import app.api.routes.health as health_route
+
+    monkeypatch.setattr(parser_node, "get_chat_model", lambda: fake_llm)
+    monkeypatch.setattr(synthesizer_node, "get_chat_model", lambda: fake_llm)
+    monkeypatch.setattr(critic_node, "get_chat_model", lambda: fake_llm)
+    monkeypatch.setattr(retriever_node, "get_interaction_retriever", lambda: interaction_retriever)
+    monkeypatch.setattr(health_route, "get_interaction_retriever", lambda: interaction_retriever)
+
+    return fake_llm

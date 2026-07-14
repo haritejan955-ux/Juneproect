@@ -1,0 +1,17 @@
+fastapi
+uvicorn[standard]
+pydantic
+pydantic-settings
+langgraph
+langchain
+langchain-core
+langchain-openai
+langchain-anthropic
+langchain-community
+faiss-cpu
+sqlalchemy
+aiosqlite
+python-multipart
+websockets
+tenacity
+python-json-logger

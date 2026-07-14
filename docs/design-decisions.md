@@ -1,33 +1,56 @@
-# Design Decision Log
+# Design Decisions
 
-Consolidated record of every non-obvious choice made in this architecture, what was rejected, and why. Detailed reasoning for each lives in the linked doc; this is the scannable index.
+A running log of choices made, alternatives considered, and why.
 
-| # | Decision | Chosen | Rejected alternative(s) | Why (short) | Detail |
-|---|---|---|---|---|---|
-| 1 | Vector store | FAISS, local, three separate indices | Chroma; one blended index with metadata filter | Corpus is small enough that a server-backed store adds ops cost with no benefit; three sources with different lifecycles (static/ephemeral/append-only) don't compose safely as one filtered index | [vector-db-architecture.md](./vector-db-architecture.md) |
-| 2 | Embedding model | OpenAI `text-embedding-3-small`, fixed regardless of chat LLM | Tie embeddings to `LLM_PROVIDER` switch | Anthropic has no embeddings API; embedding choice and chat-model choice are orthogonal concerns | [architecture.md](./architecture.md) |
-| 3 | Relational store | SQLite + SQLAlchemy 2.0 Core | Postgres; raw `sqlite3`; full SQLAlchemy ORM | Single-writer process, simple schema — Postgres solves a concurrency problem this system doesn't have; Core is the point between "no type safety" and "more abstraction than 8 simple tables need" | [database-architecture.md](./database-architecture.md) |
-| 4 | PDF parsing | PyMuPDF | pdfplumber | Better structural/positional extraction for form-like documents (CMS-1500 field boxes), which the PII field-label-proximity check depends on | [security-architecture.md](./security-architecture.md) |
-| 5 | Short-term memory | LangGraph `MemorySaver`, `thread_id = claim_id` | `SqliteSaver` for short-term too | Spec-specified; in-process is correct for "resume mid-pipeline is not a valid state to hand back," with a documented one-line upgrade path if that assumption changes | [memory-architecture.md](./memory-architecture.md) |
-| 6 | Long-term memory | Separate SQLite tables + `historical_decisions` FAISS index | Keep full LangGraph checkpoints around indefinitely | "Resume this exact run" and "look up by claimant ID" / "find similar past claims" are different problems (identity lookup vs. semantic search) with different query shapes | [memory-architecture.md](./memory-architecture.md) |
-| 7 | Dispute handling | Separate small `dispute_graph`, loads persisted context, never re-parses original documents | Re-enter the main 9-node graph | Spec requires "no re-processing the original documents"; re-running Document Preprocessor/Security Checker on every dispute message is both wasteful and reopens a risk the original gate already closed | [memory-architecture.md](./memory-architecture.md) |
-| 8 | Injection detection | Two independent layers (regex/heuristic OR LLM classifier), either can block | Regex only; LLM-only | Spec explicitly states regex-only fails the evaluation test case; OR'd (not AND'd) because a missed injection is worse than an extra manual review | [security-architecture.md](./security-architecture.md) |
-| 9 | PII redaction | Regex + field-label proximity, no NER model | spaCy or other NER dependency | Target documents (CMS-1500/EOB/etc.) have PII in structurally predictable, labeled positions — a heavy NER dependency wouldn't clearly outperform structural matching at this scope | [security-architecture.md](./security-architecture.md) |
-| 10 | Security Checker's position (node 4, after Intent Analyzer/RAG Retriever) | Keep spec's given order; add defense-in-depth prompt hardening to nodes 2–3 | Silently reorder Security Checker earlier | The 9-agent order is a graded spec requirement; the real risk from that ordering is acknowledged explicitly and mitigated, not hidden by deviating from the spec | [security-architecture.md](./security-architecture.md) |
-| 11 | Disclaimer / `attorney_flag` | Appended by application code after LLM generation, evaluated by plain conditional logic | Ask the model to include/set them via prompt instruction | Must be "non-removable" as a structural property — something the model is merely asked to do can in principle be omitted or, worst case, suppressed by an injection | [security-architecture.md](./security-architecture.md) |
-| 12 | Self-Critic retry loop | Two independent guarantees: critique is a required, non-optional prompt-template field; `retry_count` incremented by the routing function before the retry edge fires | Trust the model to read/use critique; check retry count inside the Synthesizer node | Spec explicitly calls out "same prompt → infinite loop" as the common failure; both guarantees needed so neither alone is a single point of failure | [langgraph-workflow.md](./langgraph-workflow.md) |
-| 13 | Coverage Validator → Fraud Detector | Sequential in the base graph (parallel via `Send` is a stretch goal) | Parallelize by default | Fraud Detector's upcoding check reuses Coverage Validator's CPT/diagnosis normalization; parallelizing now would mean duplicating that work or accepting a weaker signal | [langgraph-workflow.md](./langgraph-workflow.md) |
-| 14 | RAG retrieval scope | One retrieval pass (node 3), `retrieved_chunks` treated as immutable evidence set for nodes 5–8 | Let each downstream agent query independently | Citation consistency — Coverage Validator and Answer Synthesizer must be grounded in the same evidence, or their citations could disagree for the same claim | [langgraph-workflow.md](./langgraph-workflow.md) |
-| 15 | API/graph decoupling | Service layer between routers and the compiled graph; graph runs as a background task, progress via separate WebSocket | Router invokes graph synchronously | A full 9-node LLM pipeline run is multi-second-to-tens-of-seconds; blocking the HTTP request risks timeouts and blocks the "live status" requirement, which needs its own channel anyway | [api-architecture.md](./api-architecture.md) |
-| 16 | Blocked-pipeline outcome | `status: "blocked"` in the normal decision payload, HTTP 200 | Return an HTTP 4xx/5xx error | A blocked claim is the Security Checker working correctly, not a system failure — reserving error codes for actual failures keeps frontend error-handling honest | [api-architecture.md](./api-architecture.md) |
-| 17 | Repo/type separation | Three distinct model layers: API DTOs (`schemas/`), graph state (`agents/state.py`), DB tables (`memory/models.py`) | One shared model per entity | Each changes for a different reason (public contract vs. internal execution shape vs. storage constraints) — collapsing them leaks internal state into the API and DB constraints into agent logic | [architecture.md](./architecture.md) |
-| 18 | Retrieval strategy | Hybrid: dense (FAISS) + sparse (BM25) fused with Reciprocal Rank Fusion | Dense-only; weighted score averaging of dense+sparse | Dense alone is weak on exact-term queries (CPT codes, statute citations); RRF needs only rank order, so it doesn't require dense cosine similarity and unbounded BM25 scores to be on a comparable scale, which a weighted average would wrongly assume | [vector-db-architecture.md](./vector-db-architecture.md) |
-| 19 | `low_confidence` scoring after fusion | Based on the chunk's dense score specifically, never the fused RRF score | Threshold against the fused score | `similarity_threshold` is calibrated in cosine-similarity terms; RRF scores aren't on that scale, so thresholding against them would make the config value meaningless | [vector-db-architecture.md](./vector-db-architecture.md) |
-| 20 | Embedding cache key | `sha256(model_name + text)` | `sha256(text)` alone | Different embedding models produce non-comparable vectors for identical text; keying on text alone risks silently serving the wrong model's vector if embedding configuration ever changes | [vector-db-architecture.md](./vector-db-architecture.md) |
-| 21 | BM25 persistence | Rebuilt in-memory from `VectorDocStore.get_all()` at startup, never serialized to disk | Persist a second, BM25-specific index file | Source texts are already durably stored in SQLite; a second on-disk copy would be redundant storage for no benefit at this corpus size, and `rank_bm25` has no incremental-add API regardless (a full rebuild is required either way) | [vector-db-architecture.md](./vector-db-architecture.md) |
+## 1. Domain: medication interaction & prescription safety checker
 
-## Open items carried forward to implementation (not decisions yet — flagged for Milestone 0/1)
+Chosen over alternatives (clinical triage assistant, medical-records Q&A, prior-authorization
+agent) because it has a clean multi-agent decomposition (parse → normalize → retrieve →
+check → check → check → synthesize → critique → finalize), a natural RAG use case (drug
+interaction monographs), and a well-defined non-diagnostic scope: this system flags risks for
+a pharmacist/prescriber to review, it never approves or denies a prescription itself.
 
-- Exact confidence thresholds (`RAG_SIMILARITY_THRESHOLD`, Security Checker's block confidence, Self-Critic's 0.80 cutoff is spec-fixed but per-layer weighting needs real tuning) will start at reasoned defaults and need validation against the 5 test scenarios once those exist — this is explicitly called out as a stretch goal ("Self-Critic confidence score calibrated against a held-out test set") for anything beyond the initial defaults. `scripts/evaluate_retrieval.py` now exists as the harness that would make this tuning meaningful, but the RRF `k` constant and similarity threshold are still the paper/spec defaults, not corpus-tuned values.
+## 2. Deterministic checks for interaction/allergy/dosage, LLM only for parsing and synthesis
 
-Resolved since originally flagged: the public-domain policy corpus (`data/policy_corpus/`) is now populated with six accurate, citation-attributed representative excerpts of the named sources (CMS, ACA, NAIC, CA 10 CCR §2695, FEMA NFIP, FEHB) — summarizing well-established public provisions rather than reproducing large verbatim copyrighted text.
+See `docs/agent-architecture.md`'s "why deterministic checks do most of the work" section.
+The short version: interaction/allergy/dosage logic against a reference table has a
+verifiably correct answer; an LLM would only add non-determinism and untestable failure
+modes. The LLM's value-add is turning free text into structure (Parser) and turning three
+structured finding lists into one coherent, prioritized narrative (Synthesizer/Critic).
+
+## 3. A curated 10-monograph corpus, not a scrape of a real drug database
+
+Real interaction databases (Micromedex, Lexicomp, First Databank) are commercially licensed
+and not redistributable in an open project. The 10 monographs here are original, clinically
+accurate summaries covering well-known interactions, sized to make the project's test
+scenarios concrete and verifiable — not a claim of exhaustive pharmacological coverage. A
+production system would license a real interaction database and swap it in behind the same
+`InteractionRetriever` interface.
+
+## 4. FAISS + embedding cache instead of a managed vector DB
+
+See `docs/rag-architecture.md`. Ten documents don't justify Pinecone/Weaviate-style
+infrastructure; local FAISS plus a persisted embedding cache gets genuine incremental
+indexing (proven in `test_embedding_cache.py`) without any extra service to run.
+
+## 5. Approximate dose-range validation, not a full pharmacokinetic model
+
+`dosage_validator.py` compares a parsed `dose_value`/`dose_unit` against a fixed adult daily
+range and a renal-function-keyed adjustment note. It does not compute weight-based dosing,
+account for drug half-life/accumulation, or model hepatic clearance beyond a
+hepatic_function field that isn't yet consulted by the validator (only renal_function is).
+This is flagged rather than hidden: a real clinical dosing engine is a project of its own,
+and pretending otherwise here would be worse than being explicit about the simplification.
+
+## 6. Single in-process progress broadcaster, not a message broker
+
+`backend/app/services/broadcaster.py` is a plain in-memory pub/sub. It works because this
+project's deployment model is a single backend process talking to a single SQLite file (see
+`docs/database-architecture.md`'s single-writer note). Scaling to multiple backend replicas
+would need a shared broker (Redis pub/sub, etc.) — noted here so it isn't a surprise later.
+
+## 7. React + Vite instead of Next.js
+
+The frontend doesn't need server-side rendering or file-based API routes — it's a client
+rendered against a separate FastAPI backend. Vite gives a much simpler, faster dev/build
+loop for that shape of app than Next.js would.

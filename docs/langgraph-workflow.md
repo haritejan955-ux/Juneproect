@@ -1,71 +1,41 @@
 # LangGraph Workflow
 
-## 1. StateGraph node/edge diagram
+`backend/app/agents/graph.py` builds and compiles the `StateGraph[GraphState]`.
 
-```mermaid
-stateDiagram-v2
-    [*] --> document_preprocessor
+## Conditional routing
 
-    document_preprocessor --> intent_analyzer
-    intent_analyzer --> rag_retriever
-    rag_retriever --> security_checker
+Two decision points, both in `backend/app/agents/routing.py`:
 
-    state security_checker_routing <<choice>>
-    security_checker --> security_checker_routing
-    security_checker_routing --> blocked: injection_detected == True
-    security_checker_routing --> coverage_validator: injection_detected == False
+1. **`route_after_parser`** — reads `injection_detected`. If a prompt-injection attempt was
+   caught (heuristic or LLM classifier), the graph short-circuits straight to `final_output`,
+   skipping drug normalization, interaction/allergy/dosage checks, and synthesis entirely — an
+   injection attempt never reaches the LLM calls that do real clinical reasoning.
+2. **`route_after_critic`** — reads `critique_approved` and `retry_count`. Approved → straight
+   to `final_output`. Not approved and under `MAX_SYNTHESIS_RETRIES` (default 2) → `prepare_retry`,
+   which increments `retry_count` and loops back to `risk_synthesizer` with the critique injected
+   into its prompt. Not approved and out of retries → `final_output` anyway (the guard's job is
+   to bound the loop, not to block output indefinitely; the report that ships is the best
+   available draft, and `retry_count` in the audit trail records that it wasn't approved).
 
-    blocked --> [*]: END (halted, reason in audit_log)
+## Retry-loop guard
 
-    coverage_validator --> fraud_detector
-    fraud_detector --> answer_synthesizer
-    answer_synthesizer --> self_critic
+The increment lives in a dedicated node (`prepare_retry`) rather than inline in the
+conditional-edge function, for two reasons: it shows up as its own audit log entry (so a
+reviewer can see exactly how many synthesis attempts a report went through), and it makes the
+increment impossible to bypass — every path back to `risk_synthesizer` goes through it.
 
-    state self_critic_routing <<choice>>
-    self_critic --> self_critic_routing
-    self_critic_routing --> answer_synthesizer: score < 0.80 AND retry_count < 2\n(critique appended to state)
-    self_critic_routing --> final_output: score >= 0.80 OR retry_count >= 2
+## Streaming
 
-    final_output --> [*]: END
-```
+The FastAPI layer runs the graph with `stream_mode="values"` (`backend/app/services/graph_runner.py`),
+which yields the full merged state after every node completes, not just the node's delta. This
+makes it trivial to read "which agent just ran" off `audit_log[-1]["agent"]` without maintaining
+separate bookkeeping, and it's how the WebSocket progress feed (`/ws/reports/{id}`) gets its
+per-agent updates.
 
-## 2. Conditional routing — implementation contract
+## Why LLM calls are synchronous
 
-Two conditional edges exist in this graph. Both are implemented as pure functions in `agents/routing.py` that read `GraphState` and return a string naming the next node — LangGraph's standard `add_conditional_edges` pattern. Neither routing function itself calls an LLM; the *decision* that feeds the routing was already computed by the preceding node (`security_checker` or `self_critic`), so routing is just reading a flag. This keeps control flow inspectable and unit-testable without mocking an LLM.
-
-### `route_after_security(state) -> Literal["coverage_validator", "blocked"]`
-```
-if state.injection_detected:
-    return "blocked"
-return "coverage_validator"
-```
-`blocked` is a terminal node that does nothing but assemble a `final_decision` with `status="blocked"`, `reason=state.security_flags`, and an audit_log entry — it still produces a well-formed response for the API to return (HTTP 200 with a blocked-status payload, not a 500), because "the pipeline was blocked" is an expected, correctly-handled outcome, not an application error.
-
-### `route_after_critic(state) -> Literal["answer_synthesizer", "final_output"]`
-```
-if state.critic_score >= 0.80:
-    return "final_output"
-if state.retry_count >= 2:
-    state.low_confidence = True
-    return "final_output"
-return "answer_synthesizer"   # retry
-```
-
-## 3. The retry loop — how the spec's "common mistake" is structurally avoided
-
-The spec calls out the exact failure mode to avoid: *"Retrying with the same prompt → produces the same result, infinite loop."* Two independent guarantees prevent this, and they're independent on purpose (either one failing shouldn't be able to cause an infinite loop):
-
-1. **Critique injection is a state-write, not a side-channel.** `self_critic` writes `state.critique` (the specific reasons the score was low) as a first-class field. `answer_synthesizer`'s prompt template unconditionally includes `{critique}` when it is non-empty — it is not optional context the model might ignore; the prompt structure changes on retry (an added "Address the following issues from the previous attempt" section), so the second call is materially different from the first. This satisfies *"Self-Critic injects critique into Synthesizer on retry (not silently discarded)"* as a structural property of the prompt template, not a hope that the model reads it.
-2. **`retry_count` is incremented by a dedicated one-line node (`prepare_retry`), not by Answer Synthesizer itself.** LangGraph's conditional-edge path functions can only return the name of the next node — they can't mutate state directly — so `route_after_critic` (the guard) picks between `prepare_retry` and `final_output`, and only the `prepare_retry` branch increments the counter, immediately before looping back to `answer_synthesizer`. Because the guard is evaluated *before* that branch is even reached (`retry_count >= 2` routes straight to `final_output` regardless of score), there is no path through the graph that can increment past the cap — it's structurally impossible, not just conventionally avoided.
-
-If the cap is hit, `low_confidence=True` is set unconditionally — the pipeline always terminates with a well-formed decision, never with an unresolved loop or a silent failure.
-
-## 4. Why `retrieved_chunks` is fetched once (step 3) and reused by steps 5–8
-
-RAG Retriever runs once, early, and its output (`retrieved_chunks`) is treated as immutable for the remainder of the run. Coverage Validator, Fraud Detector, and Answer Synthesizer all consume it but none re-query the vector store. This is both a cost control (one retrieval pass instead of four) and a grounding control: Answer Synthesizer's acceptance criterion is *"justification must cite only from retrieved_chunks — no external knowledge"* — if each downstream node could issue its own retrieval, the citation surface would be inconsistent between what Coverage Validator cited and what Synthesizer cited for the same claim. A single shared retrieval set is the only way to guarantee those two agents are reasoning over the same evidence.
-
-The one exception is the **dispute flow** (see [memory-architecture.md](./memory-architecture.md)), which may issue *additional* targeted retrievals if the claimant references something outside the original `retrieved_chunks` — that's a different graph (`dispute_graph`), not a re-entry into this one.
-
-## 5. Parallel execution (stretch goal) — deliberately deferred, not implemented in the base graph
-
-The spec lists "Coverage Validator + Fraud Detector run in parallel via LangGraph Send API" as a stretch goal. The base graph wires them sequentially (`coverage_validator → fraud_detector`) because Fraud Detector's prompt is designed to take `coverage_map` as input context (upcoding detection specifically compares the *validated* CPT/diagnosis pairing against billed codes — it's cheaper and more accurate to reuse Coverage Validator's normalization than to redo it). Parallelizing them would require Fraud Detector to either duplicate that normalization or run on raw claim data with weaker signal. If pursued as a stretch goal, the correct fan-out point is *before* both — parallelizing on `retrieved_chunks` as shared read-only input to two independent nodes that fan back in via `Send` — not parallelizing the current sequential dependency. This is noted here so the decision isn't silently revisited under time pressure without the reasoning that led to sequential-by-default.
+The nodes call `llm.with_structured_output(Schema).invoke(...)` synchronously — LangGraph and
+the langchain sync client handle that fine, and it keeps every node a plain, easily-unit-testable
+function. The FastAPI layer runs the whole graph on a worker thread (`threading.Thread` inside
+`run_and_broadcast`) so a multi-second LLM-bound graph run never blocks the async event loop that
+serves other requests.

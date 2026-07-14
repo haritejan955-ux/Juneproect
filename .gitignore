@@ -11,10 +11,9 @@ htmlcov/
 .mypy_cache/
 .ruff_cache/
 
-# --- Node / Next.js ---
+# --- Node / Vite ---
 node_modules/
-.next/
-next-env.d.ts
+dist/
 *.tsbuildinfo
 npm-debug.log*
 
@@ -25,11 +24,11 @@ npm-debug.log*
 !.env.example
 
 # --- Generated data / build artifacts ---
-backend/data/indices/*
-!backend/data/indices/.gitkeep
-backend/data/uploads/
-backend/data/synthetic_claims/*.json
-!backend/data/synthetic_claims/.gitkeep
+backend/data/*.db
+backend/app/data/indices/*
+!backend/app/data/indices/.gitkeep
+backend/app/data/uploads/*
+!backend/app/data/uploads/.gitkeep
 
 # --- IDE / OS ---
 .DS_Store

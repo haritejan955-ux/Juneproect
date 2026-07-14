@@ -1,107 +1,62 @@
-"""StateGraph assembly — the 9 agents wired with conditional routing.
-
-`build_claim_graph` is a pure factory: every dependency (chat model,
-embeddings, vector stores, checkpointer, thresholds) is passed in rather
-than constructed here, which is what makes this graph swappable in tests
-(inject a fake chat model, an in-memory vector store) without touching node
-code. See docs/langgraph-workflow.md for the full diagram this mirrors.
-"""
-
-from functools import partial
-
-from langchain_core.embeddings import Embeddings
-from langchain_core.language_models import BaseChatModel
-from langgraph.checkpoint.base import BaseCheckpointSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 
-from app.agents.nodes.answer_synthesizer import build_answer_synthesizer_node
-from app.agents.nodes.coverage_validator import build_coverage_validator_node
-from app.agents.nodes.document_preprocessor import build_document_preprocessor_node
-from app.agents.nodes.final_output import build_final_output_node
-from app.agents.nodes.fraud_detector import build_fraud_detector_node
-from app.agents.nodes.intent_analyzer import build_intent_analyzer_node
-from app.agents.nodes.rag_retriever import build_rag_retriever_node
-from app.agents.nodes.security_checker import build_security_checker_node
-from app.agents.nodes.self_critic import build_self_critic_node
-from app.agents.routing import (
-    blocked_node,
-    increment_retry_count,
-    route_after_critic,
-    route_after_security,
+from app.agents.nodes import (
+    allergy_checker,
+    dosage_validator,
+    drug_normalizer,
+    final_output,
+    interaction_retriever,
+    patient_profile_loader,
+    prescription_parser,
+    risk_synthesizer,
+    self_critic,
 )
-from app.security.injection_detector import InjectionDetector
+from app.agents.routing import prepare_retry, route_after_critic, route_after_parser
 from app.state.graph_state import GraphState
-from app.vectorstore.base import VectorStore
 
 
-def build_claim_graph(
-    chat_model: BaseChatModel,
-    embeddings: Embeddings,
-    policy_corpus_store: VectorStore,
-    historical_decisions_store: VectorStore,
-    checkpointer: BaseCheckpointSaver,
-    rag_top_k: int,
-    rag_similarity_threshold: float,
-    security_block_confidence: float,
-    self_critic_score_threshold: float,
-    self_critic_max_retries: int,
-) -> CompiledStateGraph:
+def build_safety_graph() -> CompiledStateGraph:
     graph = StateGraph(GraphState)
 
-    graph.add_node("document_preprocessor", build_document_preprocessor_node())
-    graph.add_node("intent_analyzer", build_intent_analyzer_node(chat_model))
-    graph.add_node(
-        "rag_retriever",
-        build_rag_retriever_node(
-            policy_corpus_store,
-            historical_decisions_store,
-            embeddings,
-            rag_top_k,
-            rag_similarity_threshold,
-        ),
-    )
-    graph.add_node(
-        "security_checker",
-        build_security_checker_node(InjectionDetector(chat_model, security_block_confidence)),
-    )
-    graph.add_node("coverage_validator", build_coverage_validator_node(chat_model))
-    graph.add_node("fraud_detector", build_fraud_detector_node(chat_model))
-    graph.add_node("answer_synthesizer", build_answer_synthesizer_node(chat_model))
-    graph.add_node(
-        "self_critic",
-        build_self_critic_node(chat_model, self_critic_score_threshold, self_critic_max_retries),
-    )
-    graph.add_node("final_output", build_final_output_node())
-    graph.add_node("blocked", blocked_node)
-    graph.add_node("prepare_retry", increment_retry_count)
+    graph.add_node("prescription_parser", prescription_parser.run)
+    graph.add_node("drug_normalizer", drug_normalizer.run)
+    graph.add_node("patient_profile_loader", patient_profile_loader.run)
+    graph.add_node("interaction_retriever", interaction_retriever.run)
+    graph.add_node("allergy_checker", allergy_checker.run)
+    graph.add_node("dosage_validator", dosage_validator.run)
+    graph.add_node("risk_synthesizer", risk_synthesizer.run)
+    graph.add_node("self_critic", self_critic.run)
+    graph.add_node("prepare_retry", prepare_retry)
+    graph.add_node("final_output", final_output.run)
 
-    graph.add_edge(START, "document_preprocessor")
-    graph.add_edge("document_preprocessor", "intent_analyzer")
-    graph.add_edge("intent_analyzer", "rag_retriever")
-    graph.add_edge("rag_retriever", "security_checker")
-
+    graph.add_edge(START, "prescription_parser")
     graph.add_conditional_edges(
-        "security_checker",
-        route_after_security,
-        {"coverage_validator": "coverage_validator", "blocked": "blocked"},
+        "prescription_parser",
+        route_after_parser,
+        {"blocked": "final_output", "continue": "drug_normalizer"},
     )
-    graph.add_edge("blocked", END)
-
-    graph.add_edge("coverage_validator", "fraud_detector")
-    graph.add_edge("fraud_detector", "answer_synthesizer")
-    graph.add_edge("answer_synthesizer", "self_critic")
-
+    graph.add_edge("drug_normalizer", "patient_profile_loader")
+    graph.add_edge("patient_profile_loader", "interaction_retriever")
+    graph.add_edge("interaction_retriever", "allergy_checker")
+    graph.add_edge("allergy_checker", "dosage_validator")
+    graph.add_edge("dosage_validator", "risk_synthesizer")
+    graph.add_edge("risk_synthesizer", "self_critic")
     graph.add_conditional_edges(
         "self_critic",
-        partial(
-            route_after_critic,
-            score_threshold=self_critic_score_threshold,
-            max_retries=self_critic_max_retries,
-        ),
-        {"prepare_retry": "prepare_retry", "final_output": "final_output"},
+        route_after_critic,
+        {"retry": "prepare_retry", "final_output": "final_output"},
     )
-    graph.add_edge("prepare_retry", "answer_synthesizer")
+    graph.add_edge("prepare_retry", "risk_synthesizer")
     graph.add_edge("final_output", END)
 
-    return graph.compile(checkpointer=checkpointer)
+    return graph.compile()
+
+
+def initial_state(raw_prescription_text: str, patient_profile: dict) -> GraphState:
+    return {
+        "raw_prescription_text": raw_prescription_text,
+        "patient_profile": patient_profile,
+        "retry_count": 0,
+        "audit_log": [],
+    }

@@ -1,32 +1,24 @@
-"""Smoke test: the full app (real DB engine, real chat model/embeddings
-client construction, real empty vector stores, compiled graph) must start
-up cleanly under the lifespan context manager with no external network
-calls — see tests/conftest.py for how a dummy API key makes this safe."""
+from httpx import ASGITransport, AsyncClient
 
-from fastapi.testclient import TestClient
-
-from app.main import create_app
+from app.main import app
 
 
-def test_liveness_check_returns_ok_with_no_auth_required():
-    app = create_app()
-    with TestClient(app) as client:
-        response = client.get("/health")
+async def test_health_returns_ok():
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/health")
+    assert response.status_code == 200
+    assert response.json() == {"status": "ok"}
+
+
+async def test_ready_reports_database_and_index_checks(monkeypatch, interaction_retriever):
+    import app.api.routes.health as health_route
+
+    monkeypatch.setattr(health_route, "get_interaction_retriever", lambda: interaction_retriever)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get("/health/ready")
 
     assert response.status_code == 200
     body = response.json()
-    assert body["status"] == "ok"
-    assert body["uptime_seconds"] >= 0
-
-
-def test_readiness_check_reports_database_and_vector_store_checks():
-    app = create_app()
-    with TestClient(app) as client:
-        response = client.get("/health/ready")
-
-    assert response.status_code == 200
-    body = response.json()
-    assert body["status"] == "ok"
-    assert body["checks"]["database"]["status"] == "ok"
-    assert body["checks"]["policy_corpus_index"]["status"] == "ok"
-    assert body["checks"]["historical_decisions_index"]["status"] == "ok"
+    assert body["status"] == "ready"
+    assert body["checks"] == {"database": True, "interaction_index": True}

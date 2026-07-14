@@ -1,19 +1,12 @@
-from datetime import UTC, datetime
+from datetime import datetime, timezone
+from typing import Any
 
-from app.state.graph_state import AuditLogEntry
 
-
-def audit_update(agent: str, action: str, details: dict | None = None) -> dict:
-    """Build a partial GraphState update appending one audit_log entry.
-
-    Every node returns `{**own_updates, **audit_update(...)}` — because
-    `audit_log` uses the `operator.add` reducer (see state/graph_state.py),
-    this appends rather than overwrites what previous nodes wrote.
-    """
-    entry: AuditLogEntry = {
+def audit_entry(agent: str, action: str, detail: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Build a single timestamped audit_log entry for a GraphState-carrying agent."""
+    return {
+        "timestamp": datetime.now(timezone.utc).isoformat(),
         "agent": agent,
         "action": action,
-        "details": details or {},
-        "timestamp": datetime.now(UTC).isoformat(),
+        "detail": detail or {},
     }
-    return {"audit_log": [entry]}
