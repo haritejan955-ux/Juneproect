@@ -1,60 +1,60 @@
-# US Insurance Claim Processing Agent
+# Medication Interaction & Prescription Safety Checker
 
-A multi-agent LangGraph pipeline that processes US insurance claims: it parses uploaded claim
-documents, validates them against public-domain US policy rules, detects fraud signals, and
-produces a structured claim decision — 9 agents wired as a LangGraph `StateGraph` with
-conditional routing, a hybrid prompt-injection security gate, hybrid (dense+sparse) 3-source RAG
-with an embedding cache and incremental indexing, and a self-critique retry loop.
+A multi-agent LangGraph pipeline for medication safety review: it parses a patient's
+prescription list, normalizes drug names against a local reference table, retrieves known
+drug-drug interactions from a monograph knowledge base via hybrid RAG + metadata
+verification, cross-checks allergies/contraindications and dose ranges, and synthesizes a
+severity-ranked safety report with a self-critique retry loop — 9 agents wired as a
+LangGraph `StateGraph` with conditional routing, a hybrid prompt-injection security gate on
+all free-text input, and a pharmacist-review flag on high-severity findings.
+
+This is a clinical **decision-support** tool: it flags risks for a pharmacist or prescriber
+to review. It never approves, denies, or auto-adjusts a prescription itself.
 
 ## Status
 
-This repository currently contains the **complete project skeleton**: every module, agent node,
-API route, database model, and frontend screen is wired end-to-end with real (not stubbed)
-control flow, and the full backend test suite (136 tests: unit, integration, LangGraph
-full-pipeline, and security) passes, alongside a frontend test suite (30 tests, Vitest +
-Testing Library). The RAG layer is production-shaped: hybrid dense+sparse retrieval with
-Reciprocal Rank Fusion, a populated 6-document policy corpus, a persistent embedding cache,
-genuinely incremental ingestion (verified: a re-run over an unchanged corpus makes zero new
-embedding calls), and an evaluation harness (`scripts/evaluate_retrieval.py`) comparing hybrid
-against dense-only recall. See [docs/vector-db-architecture.md](docs/vector-db-architecture.md).
+Complete project skeleton: every module, agent node, API route, database model, and frontend
+screen is wired end-to-end with real (not stubbed) control flow. The full backend test suite
+(53 tests: unit, LangGraph full-pipeline, integration, security) passes, alongside a frontend
+test suite (8 tests, Vitest + Testing Library). `ruff`, `mypy`, `tsc`, and `eslint` are all
+clean.
 
-All 5 required test claim scenarios are done: `test_scenarios/` has real, generated PDF fixtures
-for full approval, partial approval, denial, fraud detection, and the spec's named prompt-injection
-attack, each with an automated proof (`backend/tests/langgraph/` and `backend/tests/security/`)
-that runs the fixture through the actual production graph end-to-end, not a node in isolation or
-a raw-string unit test. See [test_scenarios/README.md](test_scenarios/README.md).
+The RAG layer: hybrid FAISS retrieval with a persisted embedding cache — genuinely
+incremental (re-running the index build over an unchanged corpus makes zero new embedding
+calls, proven in `backend/tests/unit/test_embedding_cache.py`) — and metadata-verified
+citations (see [docs/rag-architecture.md](docs/rag-architecture.md)).
 
-The API surface is production-shaped: every `/api/v1/*` route requires an `X-API-Key`
-(fail-closed — an unset `API_KEYS` rejects everyone, never lets everyone through), a raw ASGI
-middleware assigns a request-correlation id that's automatically stamped onto every log line
-emitted anywhere during that request, unhandled exceptions are caught and logged without ever
-leaking a stack trace to the client, `/health` and `/health/ready` give an orchestrator real
-liveness/readiness signals (DB + both vector indices), and the dispute chat has a token-streaming
-SSE variant alongside the blocking JSON one. See
-[docs/api-architecture.md](docs/api-architecture.md) and
-[docs/security-architecture.md](docs/security-architecture.md) section 9.
+All 5 required scenarios have automated proofs running the fixture through the actual
+production graph end-to-end (`backend/tests/langgraph/`): a safe prescription with no
+findings, a major drug-drug interaction (warfarin + aspirin), an allergy contraindication
+(penicillin allergy + amoxicillin), a dosage/renal-impairment issue (metformin), and the
+Self-Critic retry loop exercised through its real conditional edge. The prompt-injection
+security gate has its own end-to-end proof in `backend/tests/security/`.
 
-What's intentionally *not* yet filled in:
+What's intentionally *not* filled in — see
+[docs/design-decisions.md](docs/design-decisions.md) for the reasoning behind each:
 
-- Agent prompts are real and specific but not yet tuned/calibrated against the 5 test scenarios
-  against a live model — the automated tests script the LLM layer deterministically (see
-  "How the test suite is organized" below) rather than depending on live API calls.
-
-See [docs/README.md](docs/README.md) for the full architecture record this was built against.
+- Agent prompts are real and specific but not yet tuned against a live model — every
+  automated test scripts the LLM layer deterministically (see below) rather than depending on
+  live API calls.
+- The interaction corpus is a curated set of 10 representative monographs, not a licensed
+  real-world drug database (those are proprietary and not redistributable).
+- Dosage validation is an approximate adult-range + renal-adjustment check, not a full
+  pharmacokinetic model.
 
 ## How the test suite is organized
 
 | Layer | Where | What it covers |
 |---|---|---|
-| Unit | `backend/tests/unit/` | Pure logic and per-node behavior with fakes: chunking, hybrid retrieval/fusion, embedding cache, PII redaction, injection heuristics, routing predicates, one file per agent node |
-| LangGraph (full pipeline) | `backend/tests/langgraph/` | `build_claim_graph` end-to-end against real PDF fixtures for all 5 required scenarios, plus the Self-Critic retry loop exercised through the real conditional edge |
-| API / integration | `backend/tests/integration/` | Auth, middleware, exception handling, health/readiness, and every REST route's HTTP contract against a real (temp SQLite) database |
-| Security | `backend/tests/security/` | The two malicious-PDF injection cases (heuristic-only and LLM-only blocking) plus PII flagging, run through the real production graph |
-| Frontend | `frontend/**/*.test.{ts,tsx}` | SSE parsing, pure display logic (`computeProgress`, status/label mappings), and component behavior (file filtering, typing-indicator state) via Vitest + Testing Library |
+| Unit | `backend/tests/unit/` | Pure logic and per-node behavior with fakes: drug normalization, allergy/dosage checks, interaction retrieval, embedding cache, injection heuristics, routing predicates — one file per agent node |
+| LangGraph (full pipeline) | `backend/tests/langgraph/` | `build_safety_graph` end-to-end against all 5 required scenarios, plus the Self-Critic retry loop exercised through the real conditional edge |
+| API / integration | `backend/tests/integration/` | Auth, health/readiness, and every REST route's HTTP contract against a real (temp SQLite) database |
+| Security | `backend/tests/security/` | Heuristic-caught and LLM-classifier-caught injection attempts, plus a legitimate-clinical-text control case, run through the real production graph |
+| Frontend | `frontend/src/**/*.test.{ts,tsx}` | API client behavior, WebSocket progress-tracking logic, and component rendering (SubmitPage form flow, FindingsList, SeverityBadge) |
 
 Every backend test — including the full-pipeline ones — runs with a scripted fake chat model
-(`backend/tests/fakes.py`), never a live LLM call: deterministic, free, and safe in CI with no
-API key. See `test_scenarios/README.md` for what that does and doesn't prove.
+and a deterministic bag-of-words fake embedding (`backend/tests/fakes.py`), never a live LLM
+or embeddings call: free, fast, and safe in CI with no API key.
 
 ## Architecture
 
@@ -63,22 +63,22 @@ API key. See `test_scenarios/README.md` for what that does and doesn't prove.
 | [docs/architecture.md](docs/architecture.md) | Folder structure, component diagram, tech stack |
 | [docs/agent-architecture.md](docs/agent-architecture.md) | The 9 agents and state ownership |
 | [docs/langgraph-workflow.md](docs/langgraph-workflow.md) | StateGraph wiring, conditional routing, retry loop |
-| [docs/api-architecture.md](docs/api-architecture.md) | REST + WebSocket surface, layering |
+| [docs/api-architecture.md](docs/api-architecture.md) | REST + WebSocket surface, auth, background processing |
 | [docs/database-architecture.md](docs/database-architecture.md) | Relational schema (SQLite) |
-| [docs/vector-db-architecture.md](docs/vector-db-architecture.md) | FAISS index design |
-| [docs/memory-architecture.md](docs/memory-architecture.md) | Short/long-term memory, dispute flow |
-| [docs/security-architecture.md](docs/security-architecture.md) | Hybrid injection detection, PII redaction |
+| [docs/rag-architecture.md](docs/rag-architecture.md) | FAISS index design, embedding cache, citation verification |
+| [docs/security-architecture.md](docs/security-architecture.md) | Hybrid injection detection |
 | [docs/design-decisions.md](docs/design-decisions.md) | Decision log — what was chosen, rejected, why |
+| [docs/deployment.md](docs/deployment.md) | Docker Compose, secrets, single-writer SQLite constraint, CI |
+| [docs/environment-variables.md](docs/environment-variables.md) | Every backend and frontend variable |
 
 ## Project layout
 
 ```
 .
 ├── backend/          FastAPI + LangGraph backend (Python 3.11)
-├── frontend/          Next.js + TypeScript + Tailwind frontend
+├── frontend/          React + Vite + TypeScript + Tailwind frontend
 ├── docker/            Dockerfiles for both services
 ├── docs/              Architecture documentation (read this first)
-├── test_scenarios/    5 required claim scenarios (see below)
 └── docker-compose.yml
 ```
 
@@ -88,13 +88,13 @@ API key. See `test_scenarios/README.md` for what that does and doesn't prove.
 
 - Python 3.11+
 - Node.js 20+
-- An OpenAI API key (required for embeddings regardless of `LLM_PROVIDER` — see
-  [docs/design-decisions.md](docs/design-decisions.md) decision #2) and/or an Anthropic API key
+- An OpenAI API key (required for embeddings regardless of `LLM_PROVIDER`) and/or an
+  Anthropic API key
 
 ### 1. Configure environment
 
 ```bash
-cp .env.example backend/.env      # fill in OPENAI_API_KEY (and ANTHROPIC_API_KEY if used)
+cp backend/.env.example backend/.env    # fill in OPENAI_API_KEY (and ANTHROPIC_API_KEY if used)
 cp frontend/.env.example frontend/.env.local
 ```
 
@@ -104,7 +104,7 @@ rejects every `/api/v1/*` request until this is set:
 ```bash
 python -c "import secrets; print(secrets.token_urlsafe(32))"
 # → put the result in backend/.env's API_KEYS=["..."] and
-#   frontend/.env.local's NEXT_PUBLIC_API_KEY=...
+#   frontend/.env.local's VITE_API_KEY=...
 ```
 
 ### 2. Backend
@@ -112,33 +112,26 @@ python -c "import secrets; print(secrets.token_urlsafe(32))"
 ```bash
 make backend-install
 make init-db
-make build-index      # builds/updates the policy_corpus hybrid index (incremental — safe to re-run)
-make seed-claims       # generates + indexes synthetic historical claim decisions
-make backend-dev        # http://localhost:8000 — interactive docs at /docs
-```
-
-To evaluate retrieval quality (hybrid vs. dense-only recall@k against the policy corpus):
-
-```bash
-cd backend && python -m scripts.evaluate_retrieval
+make build-index      # builds the interaction-corpus FAISS index (incremental — safe to re-run)
+make backend-dev      # http://localhost:8000 — interactive docs at /docs
 ```
 
 ### 3. Frontend
 
 ```bash
 make frontend-install
-make frontend-dev       # http://localhost:3000
+make frontend-dev     # http://localhost:5173
 ```
 
 ### 4. Run the tests and static analysis
 
 ```bash
-make backend-test       # 136 tests: unit, LangGraph full-pipeline, integration, security
-make backend-lint       # ruff
-make backend-typecheck  # mypy
-make frontend-test      # 30 tests: Vitest + Testing Library
-make frontend-typecheck # tsc --noEmit
-make frontend-lint      # eslint
+make backend-test        # 53 tests: unit, LangGraph full-pipeline, integration, security
+make backend-lint         # ruff
+make backend-typecheck    # mypy
+make frontend-test        # 8 tests: Vitest + Testing Library
+make frontend-typecheck   # tsc --noEmit
+make frontend-lint        # eslint
 make frontend-build
 ```
 
@@ -147,35 +140,23 @@ make frontend-build
 ```bash
 cp .env.example .env    # docker-compose reads this via env_file
 make docker-up          # backend on :8000, frontend on :3000
-```
-
-The `backend_data` named volume persists the SQLite DB, FAISS indices, and uploads across
-container restarts. After the first `docker compose up`, run the corpus/seed scripts inside the
-container once:
-
-```bash
-docker compose exec backend python -m scripts.build_policy_index
-docker compose exec backend python -m scripts.generate_synthetic_claims
+docker compose exec backend python -m scripts.build_interaction_index
 ```
 
 ## Deployment
 
-| Doc | Covers |
-|---|---|
-| [docs/environment-variables.md](docs/environment-variables.md) | Every backend and frontend variable: what it does, whether it's a secret, and how it's supplied in each environment |
-| [docs/deployment.md](docs/deployment.md) | Production deployment principles: secrets handling, persistent storage, the single-writer SQLite constraint, TLS termination, CI/CD pipeline overview, minimal non-AWS production path |
-| [docs/aws-deployment.md](docs/aws-deployment.md) | Concrete AWS reference architecture (ECS Fargate + ALB + EFS + ECR + Secrets Manager), bootstrap order, cost shape |
-| [infra/aws/ecs-stack.yaml](infra/aws/ecs-stack.yaml) | CloudFormation template provisioning the AWS architecture above |
-| [.github/workflows/deploy.yml](.github/workflows/deploy.yml) | CD pipeline: builds/pushes both images to ECR and rolls out the ECS services on push to `main` |
+See [docs/deployment.md](docs/deployment.md) for the full picture: Docker Compose setup,
+secrets handling, the single-writer SQLite constraint and what changes to scale past it, TLS
+termination, and the CI pipeline (`.github/workflows/ci.yml`).
 
 ## The 9-agent pipeline
 
 ```
-Document Preprocessor → Intent Analyzer → RAG Retriever → Security Checker
-    → [BLOCKED if injection detected]
-    → Coverage Validator → Fraud Detector → Answer Synthesizer → Self-Critic
-        → [retry Answer Synthesizer with critique, max 2 retries]
-    → Final Output
+Prescription Parser → Drug Normalizer → Patient Profile Loader → Interaction Retriever (RAG)
+    → [BLOCKED if prompt injection detected]
+    → Allergy & Contraindication Checker → Dosage Validator → Risk Synthesizer → Self-Critic
+        → [retry Risk Synthesizer with critique, max 2 retries]
+    → Final Output (pharmacist_review_flag)
 ```
 
 Full diagram and per-agent responsibilities: [docs/agent-architecture.md](docs/agent-architecture.md).
@@ -184,36 +165,33 @@ Full diagram and per-agent responsibilities: [docs/agent-architecture.md](docs/a
 
 | Route | Screen |
 |---|---|
-| `/submit` | Claim Submission — upload documents, enter query |
-| `/processing/[claimId]` | Processing View — live per-agent status over WebSocket |
-| `/decision/[claimId]` | Decision Dashboard — badge, coverage table, fraud panel, citations, attorney flag |
-| `/dispute/[claimId]` | Dispute Flow — multi-turn chat contesting a decision |
-| `/audit/[claimId]` | Audit Trail — full timestamped agent execution log |
+| `/submit` | Prescription + patient profile submission form |
+| `/processing/:reportId` | Live per-agent progress over WebSocket |
+| `/report/:reportId` | Safety report — severity badge, medications table, findings, pharmacist-review banner, audit trail |
+| `/history` | Recent reports list |
 
 ## Acceptance criteria checklist
 
-Non-negotiable criteria from the spec, and where each is implemented:
-
 - [x] All 9 LangGraph nodes correctly wired with conditional routing — `backend/app/agents/graph.py`
-- [x] Shared state flows without data loss across all agents — `backend/app/state/graph_state.py` (namespaced fields, `operator.add` audit_log reducer)
-- [x] Security Checker catches embedded prompt injection — hybrid heuristic + LLM classifier, `backend/app/security/injection_detector.py`; end-to-end proof against real malicious PDFs, run through the actual production graph, in `backend/tests/security/test_malicious_pdf_injection.py`
-- [x] RAG retrieves from all three sources with source metadata attached — `backend/app/agents/nodes/rag_retriever.py`, hybrid dense+sparse retrieval via `backend/app/vectorstore/hybrid_store.py`
-- [x] Self-Critic injects critique into Synthesizer on retry — `backend/app/prompts/answer_synthesizer_prompt.py` (critique is a required prompt-template field, not optional context)
+- [x] Shared state flows without data loss across all agents — `backend/app/state/graph_state.py` (`operator.add` audit_log reducer)
+- [x] Security Checker catches embedded prompt injection — hybrid heuristic + LLM classifier, `backend/app/security/injection_detector.py`; end-to-end proof in `backend/tests/security/test_prompt_injection.py`
+- [x] RAG retrieves from the interaction knowledge base with source metadata attached — `backend/app/agents/nodes/interaction_retriever.py`, `backend/app/rag/store.py`
+- [x] Self-Critic injects critique into the Synthesizer on retry — `backend/app/prompts/risk_synthesizer_prompt.py`
 - [x] `retry_count` guard prevents infinite loops — `backend/app/agents/routing.py` (`route_after_critic` + dedicated `prepare_retry` node)
-- [x] Every claim decision cites a specific clause or statute — enforced at the structured-output schema level in `backend/app/agents/nodes/coverage_validator.py`
+- [x] Every interaction finding cites a specific monograph — enforced by the retriever's metadata-verified citation attachment
 - [x] `audit_log` contains a timestamped entry from every agent — `backend/app/core/audit.py`, called by every node
-- [x] `attorney_flag` triggers on high-severity fraud or high-risk legal interpretation — `backend/app/agents/nodes/fraud_detector.py`
+- [x] `pharmacist_review_flag` triggers on major/contraindicated severity findings — `backend/app/agents/nodes/final_output.py`
 
 ## Deliverables checklist
 
 - [x] GitHub repo with README and setup instructions
-- [x] LangGraph agent code — each node in its own file with its own system prompt
-- [x] RAG ingestion script + vector store setup using public corpus — `backend/scripts/build_policy_index.py` (incremental, multi-format), 6-document representative corpus in `backend/data/policy_corpus/`
-- [x] FastAPI backend + WebSocket streaming endpoint — plus API-key auth, request-id/access-log middleware, structured JSON logging, `RequestValidationError`/catch-all exception handlers, liveness+readiness health checks, and an SSE token-streaming variant of the dispute endpoint; see [docs/api-architecture.md](docs/api-architecture.md)
-- [x] React frontend with all 5 screens
-- [x] 5 test claim scenarios (fraud, partial approval, denial, etc.) — real generated PDF fixtures for all 5 in `test_scenarios/`, each with an automated proof in `backend/tests/langgraph/` running the fixture through the production graph end-to-end
-- [x] Security test: documented proof PDF injection is caught — real generated PDF fixtures in `test_scenarios/05_prompt_injection_attack/`, run end-to-end through the production graph in `backend/tests/security/test_malicious_pdf_injection.py`
-- [x] `.env.example` with all required configuration keys
+- [x] LangGraph agent code — each node in its own file, LLM-backed nodes each with their own system prompt
+- [x] RAG ingestion script + vector store setup over a curated corpus — `backend/scripts/build_interaction_index.py`, 10-document monograph corpus in `backend/app/data/interaction_corpus/`
+- [x] FastAPI backend + WebSocket streaming endpoint — plus API-key auth, request-id/access-log middleware, structured JSON logging, exception handlers, liveness+readiness health checks
+- [x] React frontend with all 4 screens
+- [x] 5 test scenarios (major interaction, allergy conflict, dosage/renal issue, safe case, self-critic retry) — each with an automated proof running the fixture through the production graph end-to-end
+- [x] Security test: documented proof of prompt-injection detection — `backend/tests/security/test_prompt_injection.py`
+- [x] `.env.example` files with all required configuration keys
 
 ## License
 
